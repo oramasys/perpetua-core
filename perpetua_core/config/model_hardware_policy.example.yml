@@ -1,0 +1,41 @@
+version: 1
+
+# Hardware affinity policy for perpetua-core.
+# Copy to model_hardware_policy.yml and edit for your LAN topology.
+# Verdicts: PREFER | ALLOW | NEVER
+# See oramasys/agate for the full JSON Schema spec.
+
+models:
+  # Mac — MLX-optimized, fits 8GB unified memory
+  Qwen3.5-9B-MLX-4bit:
+    mac: PREFER
+    windows: ALLOW
+    shared: ALLOW
+
+  # Windows — large-context reasoning/coding, RTX 3080 24GB
+  Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-v2:
+    mac: NEVER     # too large for Mac unified memory
+    windows: PREFER
+    shared: ALLOW
+
+  # Known-bad model IDs — explicitly block everywhere
+  qwen3-coder:14b:  # hallucinated ID from v1 regression
+    mac: NEVER
+    windows: NEVER
+    shared: NEVER
+
+  # Lightweight fallback — any hardware
+  llama-3.2-3B:
+    mac: PREFER
+    windows: ALLOW
+    shared: ALLOW
+
+routing:
+  coding:default:     Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-v2
+  coding:reliability: Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-v2
+  coding:speed:       Qwen3.5-9B-MLX-4bit
+  reasoning:default:  Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-v2
+  reasoning:speed:    Qwen3.5-9B-MLX-4bit
+  research:default:   Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-v2
+  ops:default:        Qwen3.5-9B-MLX-4bit
+  default:            Qwen3.5-9B-MLX-4bit
