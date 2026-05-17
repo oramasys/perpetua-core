@@ -1,5 +1,5 @@
 """
-MiniGraph — ~70-line state-machine kernel.
+MiniGraph — ~80-line state-machine kernel with cycle guard.
 
 Nodes: async callables (state) -> dict
 Edges: str (static) or callable (state) -> str (conditional)
@@ -13,16 +13,26 @@ from perpetua_core.state import PerpetuaState
 
 START = "__start__"
 END = "__end__"
+_DEFAULT_MAX_STEPS = 200  # generous; cycles still trip well before runaway
 
-NodeFn = Callable[[PerpetuaState], object]  # returns Awaitable[dict] | dict
+NodeFn = Callable[[PerpetuaState], object]
 EdgeFn = Callable[[PerpetuaState], str]
 
 
+class MaxStepsExceeded(RuntimeError):
+    def __init__(self, steps: int, last_node: str):
+        super().__init__(f"MiniGraph exceeded max_steps={steps} (last node: {last_node})")
+        self.steps = steps
+        self.last_node = last_node
+
+
 class MiniGraph:
-    def __init__(self, *, interrupt_handler: str | None = None):
+    def __init__(self, *, interrupt_handler: str | None = None,
+                 max_steps: int = _DEFAULT_MAX_STEPS):
         self._nodes: dict[str, NodeFn] = {}
         self._edges: dict[str, str | EdgeFn] = {}
         self._interrupt_handler = interrupt_handler
+        self._max_steps = max_steps
 
     def add_node(self, name: str, fn: NodeFn) -> "MiniGraph":
         self._nodes[name] = fn
@@ -37,7 +47,13 @@ class MiniGraph:
         if callable(node):
             node = node(state)
 
+        steps = 0
+        last = node
         while node and node != END:
+            steps += 1
+            if steps > self._max_steps:
+                raise MaxStepsExceeded(self._max_steps, last)
+            last = node
             state = state.merge({"nodes_visited": [*state.nodes_visited, node]})
             fn = self._nodes[node]
             try:
