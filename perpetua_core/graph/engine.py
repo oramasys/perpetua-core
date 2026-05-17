@@ -76,6 +76,27 @@ class MiniGraph:
 
         return state.merge({"status": "done"})
 
+    def set_entry(self, node: str) -> "MiniGraph":
+        return self.add_edge(START, node)
+
+    def compile(self) -> "CompiledGraph":
+        return CompiledGraph(dict(self._nodes), dict(self._edges),
+                             self._interrupt_handler, self._max_steps)
+
 
 def _is_interrupt(exc: Exception) -> bool:
     return type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt")
+
+
+class CompiledGraph:
+    """Frozen MiniGraph. Mutation methods are not present."""
+    def __init__(self, nodes: dict, edges: dict, interrupt_handler: str | None, max_steps: int):
+        # Reuse MiniGraph.ainvoke logic by constructing an internal graph.
+        self._inner = MiniGraph(interrupt_handler=interrupt_handler, max_steps=max_steps)
+        for n, fn in nodes.items():
+            self._inner.add_node(n, fn)
+        for src, dst in edges.items():
+            self._inner.add_edge(src, dst)
+
+    async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
+        return await self._inner.ainvoke(state)
