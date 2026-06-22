@@ -8,3 +8,7 @@ build/
 *.db
 .env
 .DS_Store
+
+# generated test/tooling artifacts
+.hypothesis/
+.claude/hooks/.logs/
