@@ -15,7 +15,7 @@ async def post_gate_node(state: PerpetuaState) -> dict:
 
 def test_interrupt_sets_status_interrupted():
     import asyncio
-    g = MiniGraph(interrupt_handler="store")
+    g = MiniGraph()
     g.add_node("gate", gating_node)
     g.add_node("post", post_gate_node)
     g.add_edge(START, "gate")
@@ -30,7 +30,7 @@ def test_interrupt_sets_status_interrupted():
 
 def test_interrupt_carries_prompt():
     import asyncio
-    g = MiniGraph(interrupt_handler="store")
+    g = MiniGraph()
     g.add_node("gate", gating_node)
     g.add_edge(START, "gate")
     g.add_edge("gate", END)
