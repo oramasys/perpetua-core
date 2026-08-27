@@ -2,7 +2,7 @@
 
 The kernel owns only universal graph execution mechanics: named nodes, static
 or conditional edges, START/END sentinels, bounded traversal, structural
-interrupts, detached compilation, and a structural execution-event seam.
+interrupts, detached compilation, and structural execution observations.
 
 Persistence, retries, reducers, provider policy, telemetry export, and graph
 optimization remain outside this module.
@@ -33,11 +33,11 @@ TerminalReason: TypeAlias = Literal["done", "interrupted"]
 
 @dataclass(frozen=True, slots=True)
 class GraphEvent:
-    """Structural in-process execution event.
+    """Sanitized structural execution event.
 
-    Events intentionally contain control-plane metadata only. Rich state,
-    prompts, deltas, persistence, and exporter concerns stay outside the
-    public event contract.
+    ``GraphEvent`` is the control-plane projection intended for streaming,
+    API/UI consumers, and other observers that do not need graph state.
+    Rich state and node deltas live on :class:`GraphObservation` instead.
     """
 
     kind: EventKind
@@ -48,9 +48,17 @@ class GraphEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class _ExecutionRecord:
+class GraphObservation:
+    """Rich in-process observation emitted by the canonical scheduler.
+
+    The observation seam exists for trusted in-process adapters such as
+    checkpointers, tracers, audit hooks, and plugin dispatchers. ``delta`` is
+    present for ``node.end`` observations and ``None`` for other event kinds.
+    """
+
     event: GraphEvent
     state: PerpetuaState
+    delta: NodeDelta | None = None
 
 
 class MaxStepsExceeded(RuntimeError):
@@ -85,22 +93,30 @@ class CompiledGraph:
     async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
         """Run the graph to normal completion or structural interruption."""
         final_state = state
-        async for record in self._run(state):
-            final_state = record.state
+        async for observation in self.aobserve(state):
+            final_state = observation.state
         return final_state
 
-    async def asteps(self, state: PerpetuaState) -> AsyncIterator[GraphEvent]:
-        """Yield structural events from the same scheduler used by ``ainvoke``."""
-        async for record in self._run(state):
-            yield record.event
+    async def aobserve(
+        self,
+        state: PerpetuaState,
+    ) -> AsyncIterator[GraphObservation]:
+        """Yield rich in-process observations from the canonical scheduler."""
+        async for observation in self._run(state):
+            yield observation
 
-    async def _run(self, state: PerpetuaState) -> AsyncIterator[_ExecutionRecord]:
-        """Sole graph scheduler; adapters consume this instead of reimplementing it."""
+    async def asteps(self, state: PerpetuaState) -> AsyncIterator[GraphEvent]:
+        """Yield sanitized structural events from the canonical scheduler."""
+        async for observation in self.aobserve(state):
+            yield observation.event
+
+    async def _run(self, state: PerpetuaState) -> AsyncIterator[GraphObservation]:
+        """Sole graph scheduler; all execution views project from this loop."""
         node = self._resolve_edge(self._edges.get(START, END), state)
         steps = 0
         last_node = START
 
-        yield _ExecutionRecord(
+        yield GraphObservation(
             GraphEvent("edge.selected", node=START, target=node, steps=steps),
             state,
         )
@@ -116,7 +132,7 @@ class CompiledGraph:
             )
             last_node = current_node
 
-            yield _ExecutionRecord(
+            yield GraphObservation(
                 GraphEvent("node.start", node=current_node, steps=steps),
                 state,
             )
@@ -128,7 +144,7 @@ class CompiledGraph:
             except Exception as exc:
                 if _is_interrupt(exc):
                     state = _interrupted_state(state, current_node, exc)
-                    yield _ExecutionRecord(
+                    yield GraphObservation(
                         GraphEvent(
                             "interrupt",
                             node=current_node,
@@ -148,13 +164,14 @@ class CompiledGraph:
 
             state = state.merge(delta)
             steps += 1
-            yield _ExecutionRecord(
+            yield GraphObservation(
                 GraphEvent("node.end", node=current_node, steps=steps),
                 state,
+                delta=delta,
             )
 
             node = self._resolve_edge(self._edges.get(current_node, END), state)
-            yield _ExecutionRecord(
+            yield GraphObservation(
                 GraphEvent(
                     "edge.selected",
                     node=current_node,
@@ -165,7 +182,7 @@ class CompiledGraph:
             )
 
         state = state.merge({"status": "done"})
-        yield _ExecutionRecord(
+        yield GraphObservation(
             GraphEvent("done", steps=steps, terminal_reason="done"),
             state,
         )
