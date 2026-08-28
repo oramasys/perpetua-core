@@ -1,4 +1,5 @@
 from __future__ import annotations
+from copy import deepcopy
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,13 +27,15 @@ class PerpetuaState(BaseModel):
     def merge(self, delta: dict[str, Any]) -> "PerpetuaState":
         """Return an isolated next state with ``delta`` applied.
 
-        ``deep=True`` is load-bearing. Pydantic's ``model_copy`` is shallow by
-        default, which would otherwise alias untouched nested mutable fields
-        such as ``scratchpad``, ``messages``, ``metadata``, and
-        ``nodes_visited`` between state generations.
+        Both copy layers are load-bearing. ``deep=True`` isolates nested mutable
+        values inherited from the current model. ``deepcopy(delta)`` separately
+        isolates mutable values supplied by the caller because Pydantic applies
+        ``update`` values after copying the model and otherwise keeps those
+        update references directly.
 
         Nodes and observers must still treat the state they receive as input,
-        not as a mutable workspace. ``merge`` guarantees isolation between
-        generations; it does not make Python containers intrinsically frozen.
+        not as a mutable workspace. ``merge`` guarantees isolation between the
+        prior state, caller-owned delta values, and the returned generation; it
+        does not make Python containers intrinsically frozen.
         """
-        return self.model_copy(update=delta, deep=True)
+        return self.model_copy(update=deepcopy(delta), deep=True)
