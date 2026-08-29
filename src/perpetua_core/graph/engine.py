@@ -195,8 +195,7 @@ class CompiledGraph:
                 f"MiniGraph has no node registered as {name!r}"
             ) from None
 
-    @staticmethod
-    def _resolve_edge(edge: Edge, state: PerpetuaState) -> str:
+    def _resolve_edge(self, edge: Edge, state: PerpetuaState) -> str:
         target = edge(state) if callable(edge) else edge
         if not isinstance(target, str):
             raise TypeError(
@@ -205,6 +204,10 @@ class CompiledGraph:
             )
         if not target:
             raise ValueError("MiniGraph edge resolved to an empty node name")
+        if target != END and target not in self._nodes:
+            raise ValueError(
+                f"MiniGraph edge resolved to unknown node {target!r}"
+            )
         return target
 
 
