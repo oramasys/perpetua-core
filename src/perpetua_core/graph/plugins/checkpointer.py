@@ -1,6 +1,9 @@
 """SQLite checkpointer plugin — persist and resume graph state."""
 from __future__ import annotations
+
 import aiosqlite
+
+from perpetua_core.graph.engine import GraphObservation
 from perpetua_core.state import PerpetuaState
 
 CREATE_TABLE = """
@@ -29,6 +32,17 @@ class SqliteCheckpointer:
                 (state.session_id, node, state.model_dump_json()),
             )
             await db.commit()
+
+    async def on_observation(self, observation: GraphObservation) -> None:
+        """Checkpoint each successfully completed node transition.
+
+        ``run_with_plugins`` may dispatch this alongside tracers, audit hooks,
+        and other observers during the same graph run. The checkpointer does not
+        schedule or traverse the graph itself.
+        """
+        event = observation.event
+        if event.kind == "node.end" and event.node is not None:
+            await self.save(observation.state, node=event.node)
 
     async def load_latest(self, session_id: str) -> PerpetuaState | None:
         async with aiosqlite.connect(self._db_path) as db:
