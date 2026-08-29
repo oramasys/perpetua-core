@@ -42,12 +42,12 @@ GraphObservation(event, state, delta?)
 
 `PerpetuaState.merge()` isolates inherited nested state and caller-owned delta
 values. `MiniGraph` is a mutable construction workspace; `compile()` produces a
-detached execution snapshot. Unknown routes fail at route resolution on the
-post-merge convergence branch. Plugin fan-out is deterministic, awaits async
-callbacks, fails closed by default, and gives each listener a detached rich
-observation payload on that branch.
+detached execution snapshot. Unknown routes fail at route resolution on current
+`main`. Plugin fan-out is deterministic, awaits async callbacks, fails closed by
+default, and gives each listener a detached rich observation payload on current
+`main`.
 
-Post-merge correction status is recorded in
+Post-merge correction history and its integration status are recorded in
 [`docs/POST_MERGE_CONVERGENCE_2026-08-29.md`](docs/POST_MERGE_CONVERGENCE_2026-08-29.md).
 That document and tested source are current status; `docs/PROGRESS.md` is a
 historical May 2026 salvage ledger.
