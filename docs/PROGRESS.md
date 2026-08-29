@@ -1,5 +1,14 @@
 # Salvage Translation Progress — RC-1
 
+> **Historical record — 2026-05-17.** This file is the completed RC-1 salvage
+> ledger and preserves the branch/push policy that applied to that work. It is
+> not the current MiniGraph integration or authority status. For the post-merge
+> 2026-08-29 state, see
+> [`POST_MERGE_CONVERGENCE_2026-08-29.md`](POST_MERGE_CONVERGENCE_2026-08-29.md).
+> Current cross-repository architecture/policy authority is maintained in the
+> Orama v2 records; tested `perpetua-core` source owns executable field-level
+> behavior.
+
 **Plan:** `orama-system/docs/superpowers/plans/2026-05-17-salvage-translation-v1-discovery.md`
 **Generation labels** (per Canonical Repo Registry):
 - **v1-legacy**: `diazMelgarejo/Perpetua-Tools` on `feat/ip-aware-discovery`
@@ -86,5 +95,7 @@
 During Wave 1A parallel dispatch, three subagents (C8 tool_node, C9 validator, C11 parallel) hit a `.git/index.lock` race. The serializing winner (C11) committed all three plugin files plus its own under one commit `8eaba56`, mis-labeled "Task 11". **Content is correct per plan** — each subagent verified its own writes against the plan; the bit-identical match was confirmed in their post-commit audits. No work was lost. Future plans should serialize commits inside parallel waves (e.g., orchestrator collects file artifacts and commits them) to avoid this. See LESSONS.md note 2026-05-17.
 
 ## Push policy
+
+> Historical RC-1 policy below; it does not govern the current corrective branch.
 
 All three branches stay **local** until user reviews end-to-end on Mac+Win hardware (Mac Ollama `localhost:11434` + Win LM Studio `192.168.254.103:1234`). Only `orama-system/docs/` push happens immediately (cross-cutting docs).
