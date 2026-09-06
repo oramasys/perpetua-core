@@ -108,7 +108,13 @@ def test_pipe_operator_chains_two_runnables() -> None:
     assert result.scratchpad == {"a": True, "b": True, "c": True}
 
 
+@pytest.mark.filterwarnings("error")
 def test_invoke_raises_clearly_from_inside_a_running_loop() -> None:
+    """Regression test: invoke()/batch()/stream() must check for a running
+    loop BEFORE creating their coroutine, not after -- otherwise a rejected
+    call leaves an unawaited coroutine behind, surfacing as a spurious
+    'coroutine was never awaited' RuntimeWarning (caught here by promoting
+    warnings to errors: the test fails if that warning reappears)."""
     adapter = LangChainRunnableAdapter(_linear_graph())
 
     async def call_sync_invoke_from_async_context() -> None:

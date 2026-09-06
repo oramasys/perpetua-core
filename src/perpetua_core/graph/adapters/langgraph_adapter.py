@@ -11,6 +11,22 @@ MiniGraph's ``Edge`` type is a union (``str | Callable[[PerpetuaState], str]``)
 stored in ONE ``edges`` mapping — static vs. conditional routing is
 distinguished with ``isinstance(edge, str)`` at export time, not by two
 separate structures.
+
+**Topology-only export, not scheduler-semantics parity.** This exporter
+moves node functions and edge topology into LangGraph's own execution
+engine; it does not replicate MiniGraph's canonical scheduler
+(``CompiledGraph._run``). Concretely, the exported graph runs under
+LangGraph's semantics for: interrupt handling (MiniGraph's
+``_is_interrupt``/``_interrupted_state`` machinery does not exist in
+LangGraph and is not reproduced here), ``nodes_visited`` bookkeeping
+(MiniGraph auto-appends to ``state.nodes_visited`` before every node call;
+LangGraph does not, so an exported graph's node functions that rely on that
+side effect having already happened will not see it), and ``max_steps``
+enforcement (MiniGraph's ``MaxStepsExceeded`` guard is not carried over —
+use LangGraph's own recursion-limit config instead). Use this exporter when
+you need MiniGraph's *topology* inside a LangGraph deployment (e.g. LangGraph
+Cloud, a LangGraph supervisor); do not assume identical run-time behavior to
+``MiniGraph.ainvoke()``.
 """
 from __future__ import annotations
 

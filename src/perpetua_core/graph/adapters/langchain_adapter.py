@@ -28,6 +28,25 @@ def _coerce_state(input_data: PerpetuaState | dict[str, Any]) -> PerpetuaState:
     return PerpetuaState(**input_data)
 
 
+def _reject_if_loop_running() -> None:
+    """Raise before a sync bridge method creates its coroutine.
+
+    Checking first (rather than letting ``asyncio.run()`` reject an
+    already-created coroutine) avoids a spurious "coroutine was never
+    awaited" warning: if we built the coroutine and only then discovered a
+    loop was already running, that coroutine object would be garbage
+    collected unawaited.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(
+        "invoke()/batch()/stream() cannot be called from inside a running "
+        "event loop; use ainvoke()/abatch()/astream() instead."
+    )
+
+
 class LangChainRunnableAdapter:
     """Wraps a MiniGraph/CompiledGraph as a LangChain-Runnable-shaped object.
 
@@ -81,10 +100,11 @@ class LangChainRunnableAdapter:
         """Run to completion synchronously.
 
         MiniGraph/CompiledGraph expose no synchronous execution path — this
-        bridges via ``asyncio.run()``. Raises ``RuntimeError`` (from
-        ``asyncio.run`` itself) if called from inside an already-running
-        event loop; use :meth:`ainvoke` there instead of nesting loops.
+        bridges via ``asyncio.run()``. Raises ``RuntimeError`` if called from
+        inside an already-running event loop; use :meth:`ainvoke` there
+        instead of nesting loops.
         """
+        _reject_if_loop_running()
         return asyncio.run(self.ainvoke(input_data, config=config))
 
     def batch(
@@ -92,6 +112,7 @@ class LangChainRunnableAdapter:
         inputs: list[PerpetuaState | dict[str, Any]],
         config: dict[str, Any] | None = None,
     ) -> list[PerpetuaState]:
+        _reject_if_loop_running()
         return asyncio.run(self.abatch(inputs, config=config))
 
     def stream(
@@ -105,6 +126,7 @@ class LangChainRunnableAdapter:
         it is not lazy/incremental like :meth:`astream`. Prefer ``astream``
         in an async context; this exists only for sync-only LCEL callers.
         """
+        _reject_if_loop_running()
 
         async def _collect() -> list[PerpetuaState]:
             return [snapshot async for snapshot in self.astream(input_data, config=config)]
@@ -134,6 +156,7 @@ class ChainedRunnable:
         return await self._second.ainvoke(intermediate, config=config)
 
     def invoke(self, input_data: Any, config: dict[str, Any] | None = None) -> Any:
+        _reject_if_loop_running()
         return asyncio.run(self.ainvoke(input_data, config=config))
 
     def __or__(self, other: Any) -> "ChainedRunnable":
