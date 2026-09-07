@@ -10,8 +10,9 @@ optimization remain outside this module.
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
 from perpetua_core.state import PerpetuaState
@@ -89,6 +90,29 @@ class CompiledGraph:
         self._nodes = dict(nodes)
         self._edges = dict(edges)
         self._max_steps = max_steps
+
+    @property
+    def nodes(self) -> Mapping[str, NodeFn]:
+        """Read-only view of the compiled topology's nodes.
+
+        For external, read-only consumers (e.g. edge adapters that export
+        this topology into another graph runtime) that must not reimplement
+        traversal by reaching into the private ``_nodes``/``_edges`` state
+        the canonical scheduler owns. Execution semantics live in
+        :meth:`ainvoke`/:meth:`aobserve`/:meth:`asteps`, not here.
+        """
+        return MappingProxyType(self._nodes)
+
+    @property
+    def edges(self) -> Mapping[str, Edge]:
+        """Read-only view of the compiled topology's edges.
+
+        Each value is either a static target node name (``str``) or a
+        conditional routing callable (``EdgeFn``) — distinguish with
+        ``isinstance(edge, str)``, there is no separate conditional-edges
+        structure. The entry edge is ``edges[START]`` when present.
+        """
+        return MappingProxyType(self._edges)
 
     async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
         """Run the graph to normal completion or structural interruption."""
@@ -232,6 +256,16 @@ class MiniGraph:
 
     def compile(self) -> CompiledGraph:
         return CompiledGraph(self._nodes, self._edges, self._max_steps)
+
+    @property
+    def nodes(self) -> Mapping[str, NodeFn]:
+        """Read-only view of the builder's nodes so far. See :attr:`CompiledGraph.nodes`."""
+        return MappingProxyType(self._nodes)
+
+    @property
+    def edges(self) -> Mapping[str, Edge]:
+        """Read-only view of the builder's edges so far. See :attr:`CompiledGraph.edges`."""
+        return MappingProxyType(self._edges)
 
     async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
         return await self.compile().ainvoke(state)
