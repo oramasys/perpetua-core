@@ -122,3 +122,93 @@ def test_invoke_raises_clearly_from_inside_a_running_loop() -> None:
 
     with pytest.raises(RuntimeError):
         asyncio.run(call_sync_invoke_from_async_context())
+
+
+@pytest.mark.filterwarnings("error")
+def test_batch_raises_clearly_from_inside_a_running_loop() -> None:
+    """CodeRabbit finding: the running-loop guard test previously covered
+    only invoke() -- extend the same coverage to batch()."""
+    adapter = LangChainRunnableAdapter(_linear_graph())
+
+    async def call_sync_batch_from_async_context() -> None:
+        adapter.batch([make_state()])
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(call_sync_batch_from_async_context())
+
+
+@pytest.mark.filterwarnings("error")
+def test_stream_raises_clearly_from_inside_a_running_loop() -> None:
+    """CodeRabbit finding: the running-loop guard test previously covered
+    only invoke() -- extend the same coverage to stream()."""
+    adapter = LangChainRunnableAdapter(_linear_graph())
+
+    async def call_sync_stream_from_async_context() -> None:
+        list(adapter.stream(make_state()))
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(call_sync_stream_from_async_context())
+
+
+def test_abatch_honors_max_concurrency() -> None:
+    """CodeRabbit finding: abatch() silently ignored
+    RunnableConfig['max_concurrency'], always running every input fully
+    concurrently via asyncio.gather. This proves it actually bounds the
+    number of in-flight graph runs, not just that it accepts the key."""
+    peak_concurrent = 0
+    current_concurrent = 0
+
+    def node_track_concurrency(state: PerpetuaState) -> dict:
+        # Synchronous nodes can't yield control mid-run, so concurrency is
+        # observed at the graph-run boundary via a wrapping async node
+        # instead -- see the ainvoke override below.
+        return {}
+
+    class _TrackedAdapter(LangChainRunnableAdapter):
+        async def ainvoke(self, input_data, config=None):  # type: ignore[override]
+            nonlocal peak_concurrent, current_concurrent
+            current_concurrent += 1
+            peak_concurrent = max(peak_concurrent, current_concurrent)
+            try:
+                await asyncio.sleep(0.01)
+                return await super().ainvoke(input_data, config=config)
+            finally:
+                current_concurrent -= 1
+
+    g = MiniGraph()
+    g.add_node("a", node_track_concurrency)
+    g.add_edge(START, "a")
+    g.add_edge("a", END)
+    adapter = _TrackedAdapter(g)
+
+    inputs = [make_state(session_id=f"s{i}") for i in range(6)]
+    results = asyncio.run(adapter.abatch(inputs, config={"max_concurrency": 2}))
+
+    assert len(results) == 6
+    assert peak_concurrent <= 2, f"expected at most 2 concurrent runs, saw {peak_concurrent}"
+
+
+def test_abatch_without_max_concurrency_runs_fully_concurrent() -> None:
+    """Omitting max_concurrency must preserve the prior behavior exactly --
+    no artificial bound when the caller didn't ask for one."""
+    peak_concurrent = 0
+    current_concurrent = 0
+
+    class _TrackedAdapter(LangChainRunnableAdapter):
+        async def ainvoke(self, input_data, config=None):  # type: ignore[override]
+            nonlocal peak_concurrent, current_concurrent
+            current_concurrent += 1
+            peak_concurrent = max(peak_concurrent, current_concurrent)
+            try:
+                await asyncio.sleep(0.01)
+                return await super().ainvoke(input_data, config=config)
+            finally:
+                current_concurrent -= 1
+
+    adapter = _TrackedAdapter(_linear_graph())
+    inputs = [make_state(session_id=f"s{i}") for i in range(6)]
+
+    results = asyncio.run(adapter.abatch(inputs))
+
+    assert len(results) == 6
+    assert peak_concurrent == 6

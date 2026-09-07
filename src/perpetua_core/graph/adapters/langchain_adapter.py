@@ -73,9 +73,25 @@ class LangChainRunnableAdapter:
         inputs: list[PerpetuaState | dict[str, Any]],
         config: dict[str, Any] | None = None,
     ) -> list[PerpetuaState]:
-        return list(
-            await asyncio.gather(*(self.ainvoke(item, config=config) for item in inputs))
-        )
+        """Run every input's graph concurrently, honoring
+        ``config["max_concurrency"]`` (a standard ``RunnableConfig`` key)
+        when the caller supplies it. Omitting it preserves the prior
+        behavior exactly -- fully concurrent via ``asyncio.gather``, no
+        artificial bound the caller didn't ask for.
+        """
+        max_concurrency = (config or {}).get("max_concurrency")
+        if max_concurrency is None:
+            return list(
+                await asyncio.gather(*(self.ainvoke(item, config=config) for item in inputs))
+            )
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def _bounded(item: PerpetuaState | dict[str, Any]) -> PerpetuaState:
+            async with semaphore:
+                return await self.ainvoke(item, config=config)
+
+        return list(await asyncio.gather(*(_bounded(item) for item in inputs)))
 
     async def astream(
         self, input_data: PerpetuaState | dict[str, Any], config: dict[str, Any] | None = None
