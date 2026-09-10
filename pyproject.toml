@@ -13,7 +13,7 @@ dependencies = [
     "pyyaml>=6.0",
     "aiosqlite>=0.19",
     "openai>=1.0",
-    "oramasys-telos @ git+https://github.com/oramasys/telos.git@893860b",
+    "oramasys-telos @ git+https://github.com/oramasys/telos.git@b2143083044496d93be3ca2dc88c28135e034d9f",
 ]
 
 [project.optional-dependencies]
