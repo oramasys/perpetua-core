@@ -10,6 +10,7 @@ import inspect
 import json
 import socket
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -30,6 +31,14 @@ def _serve_once(sock: socket.socket, status_line: str, body: bytes) -> None:
     sock.close()
 
 
+def _serve_raw_once(sock: socket.socket, payload: bytes) -> None:
+    conn, _ = sock.accept()
+    conn.recv(4096)
+    conn.sendall(payload)
+    conn.close()
+    sock.close()
+
+
 def _start_server(status_line: str, body: bytes) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
@@ -38,6 +47,20 @@ def _start_server(status_line: str, body: bytes) -> int:
     thread = threading.Thread(
         target=_serve_once,
         args=(sock, status_line, body),
+        daemon=True,
+    )
+    thread.start()
+    return port
+
+
+def _start_raw_server(payload: bytes) -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    port = sock.getsockname()[1]
+    thread = threading.Thread(
+        target=_serve_raw_once,
+        args=(sock, payload),
         daemon=True,
     )
     thread.start()
@@ -77,16 +100,23 @@ async def test_health_probe_reports_degraded_on_malformed_json():
 
 
 @pytest.mark.asyncio
-async def test_health_probe_rejects_public_address_without_attempting_a_connection():
-    """A literal public IP must be rejected by Telos before transport dispatch."""
-    import time
+async def test_health_probe_reports_offline_on_malformed_http_response():
+    port = _start_raw_server(b"NOT-HTTP\r\n\r\n")
 
-    start = time.monotonic()
-    result = await health_probe("http://93.184.216.34/v1")
-    elapsed = time.monotonic() - start
+    result = await health_probe(f"http://127.0.0.1:{port}/v1")
+
     assert result.health == BackendHealth.OFFLINE
     assert result.models == ()
-    assert elapsed < 1.0, (
-        f"rejection took {elapsed:.2f}s -- too slow for a local policy check, "
-        "suggests this passed due to network unreachability, not Telos policy"
-    )
+
+
+@pytest.mark.asyncio
+async def test_health_probe_rejects_public_address_without_attempting_a_connection():
+    """A literal public IP must be rejected by Telos before socket creation."""
+    with patch(
+        "telos.transport.socket.create_connection",
+        side_effect=AssertionError("public address must not be dialed"),
+    ):
+        result = await health_probe("http://93.184.216.34/v1")
+
+    assert result.health == BackendHealth.OFFLINE
+    assert result.models == ()
