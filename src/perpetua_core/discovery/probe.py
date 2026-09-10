@@ -1,15 +1,29 @@
 from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
-from secrets import token_urlsafe
 import json
-from telos.contracts import EndpointPurpose, EndpointUseDecision, EndpointUseRequest
-from telos.errors import EndpointPolicyError
+from secrets import token_urlsafe
+
+from telos import (
+    EndpointAuthorizer,
+    EndpointPolicyError,
+    EndpointPurpose,
+    TransportPolicy,
+    endpoint_from_url,
+    request,
+)
 from telos.resolver import _stdlib_resolver
-from telos.transport import TransportPolicy, request
+
 from .backend import BackendHealth
 
 _TIMEOUT_S = 1.5
+_POLICY = TransportPolicy(
+    allow_public=False,
+    allow_private=True,
+    allow_loopback=True,
+    require_https_for_public=True,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,36 +32,20 @@ class ProbeResult:
     models: tuple[str, ...]
 
 
-class _AlwaysAllowHealthProbeAuthorizer:
-    """Health-probe-only authorizer: semantic allowlisting is deliberately
-    not the security boundary here. Discovery is inherently dynamic
-    (autodetect's seed list can change; register_by_ip is ad hoc by
-    design), so there is no fixed endpoint set to check in advance.
-    Transport safety is the real gate: the TransportPolicy this module
-    passes sets allow_public=False unconditionally, so a health probe can
-    reach loopback/private/LAN addresses only, never a public address,
-    regardless of what host this authorizer allows semantically. Scoped
-    to this one module's sole purpose (HEALTH_PROBE) rather than a
-    general-purpose always-allow authorizer that could be misused
-    elsewhere."""
+def _candidate_authorizer(url: str) -> EndpointAuthorizer:
+    """Authorize only the explicit discovery candidate for HEALTH_PROBE.
 
-    def authorize(self, req: EndpointUseRequest) -> EndpointUseDecision:
-        return EndpointUseDecision(
-            allowed=True,
-            reason_code="allowed",
-            policy_version="perpetua-core-health-probe-v1",
-            decision_ref=token_urlsafe(18),
-            endpoint=req.endpoint,
-        )
+    Discovery supplies intent for one concrete endpoint. Telos remains the
+    semantic authority: the exact normalized endpoint is admitted for this
+    purpose, while transport policy independently constrains the resolved
+    destination classes and secure connection behavior.
+    """
 
-
-_AUTHORIZER = _AlwaysAllowHealthProbeAuthorizer()
-_POLICY = TransportPolicy(
-    allow_public=False,
-    allow_private=True,
-    allow_loopback=True,
-    require_https_for_public=True,
-)
+    candidate = endpoint_from_url(url)
+    return EndpointAuthorizer.from_exact_rules(
+        {EndpointPurpose.HEALTH_PROBE: {candidate.key}},
+        version="perpetua-core-health-probe-v1",
+    )
 
 
 async def health_probe(base_url: str, *, timeout: float = _TIMEOUT_S) -> ProbeResult:
@@ -57,7 +55,7 @@ async def health_probe(base_url: str, *, timeout: float = _TIMEOUT_S) -> ProbeRe
             request,
             "GET",
             url,
-            authorizer=_AUTHORIZER,
+            authorizer=_candidate_authorizer(url),
             transport_policy=_POLICY,
             actor_id="perpetua-core-discovery",
             workflow_id="health-probe",
