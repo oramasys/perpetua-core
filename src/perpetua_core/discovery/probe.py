@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import http.client
 import json
 from secrets import token_urlsafe
 
@@ -64,7 +65,7 @@ async def health_probe(base_url: str, *, timeout: float = _TIMEOUT_S) -> ProbeRe
             timeout=timeout,
             resolver=_stdlib_resolver,
         )
-    except (EndpointPolicyError, OSError):
+    except (EndpointPolicyError, OSError, http.client.HTTPException):
         return ProbeResult(BackendHealth.OFFLINE, ())
     if response.status != 200:
         return ProbeResult(BackendHealth.OFFLINE, ())
