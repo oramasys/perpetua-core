@@ -4,8 +4,9 @@ The kernel owns only universal graph execution mechanics: named nodes, static
 or conditional edges, START/END sentinels, bounded traversal, structural
 interrupts, detached compilation, and structural execution observations.
 
-Persistence, retries, reducers, provider policy, telemetry export, and graph
-optimization remain outside this module.
+GraphSpec description/linting is declarative and never becomes a second
+scheduler. Persistence, retries, reducers, provider policy, telemetry export,
+and graph optimization remain outside this module.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
+from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec, stable_callable_ref
 from perpetua_core.state import PerpetuaState
 
 START = "__start__"
@@ -25,7 +27,29 @@ NodeDelta: TypeAlias = dict[str, Any]
 NodeResult: TypeAlias = NodeDelta | Awaitable[NodeDelta]
 NodeFn: TypeAlias = Callable[[PerpetuaState], NodeResult]
 EdgeFn: TypeAlias = Callable[[PerpetuaState], str]
-Edge: TypeAlias = str | EdgeFn
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalEdge:
+    """Conditional routing with optional declarative target metadata.
+
+    ``router`` remains the runtime callable used by the canonical scheduler.
+    ``declared_targets`` is structural metadata only and lets GraphSpec/static
+    validation reason more precisely without executing the router.
+    """
+
+    router: EdgeFn
+    declared_targets: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "declared_targets",
+            tuple(sorted(set(self.declared_targets))),
+        )
+
+
+Edge: TypeAlias = str | EdgeFn | ConditionalEdge
 EventKind: TypeAlias = Literal[
     "node.start", "node.end", "edge.selected", "interrupt", "done"
 ]
@@ -78,6 +102,43 @@ class MaxStepsExceeded(RuntimeError):
         )
 
 
+def _describe_topology(
+    nodes: Mapping[str, NodeFn],
+    edges: Mapping[str, Edge],
+    max_steps: int,
+) -> GraphSpec:
+    node_specs = tuple(
+        NodeSpec(name=name, implementation_ref=stable_callable_ref(fn))
+        for name, fn in nodes.items()
+    )
+    edge_specs: list[EdgeSpec] = []
+    for source, edge in edges.items():
+        if isinstance(edge, str):
+            edge_specs.append(EdgeSpec(source=source, kind="static", target=edge))
+        elif isinstance(edge, ConditionalEdge):
+            edge_specs.append(
+                EdgeSpec(
+                    source=source,
+                    kind="conditional",
+                    router_ref=stable_callable_ref(edge.router),
+                    declared_targets=edge.declared_targets,
+                )
+            )
+        else:
+            edge_specs.append(
+                EdgeSpec(
+                    source=source,
+                    kind="conditional",
+                    router_ref=stable_callable_ref(edge),
+                )
+            )
+    return GraphSpec.create(
+        max_steps=max_steps,
+        nodes=node_specs,
+        edges=tuple(edge_specs),
+    )
+
+
 class CompiledGraph:
     """Detached execution snapshot of a :class:`MiniGraph` topology."""
 
@@ -93,26 +154,28 @@ class CompiledGraph:
 
     @property
     def nodes(self) -> Mapping[str, NodeFn]:
-        """Read-only view of the compiled topology's nodes.
-
-        For external, read-only consumers (e.g. edge adapters that export
-        this topology into another graph runtime) that must not reimplement
-        traversal by reaching into the private ``_nodes``/``_edges`` state
-        the canonical scheduler owns. Execution semantics live in
-        :meth:`ainvoke`/:meth:`aobserve`/:meth:`asteps`, not here.
-        """
+        """Read-only view of the compiled topology's nodes."""
         return MappingProxyType(self._nodes)
 
     @property
     def edges(self) -> Mapping[str, Edge]:
         """Read-only view of the compiled topology's edges.
 
-        Each value is either a static target node name (``str``) or a
-        conditional routing callable (``EdgeFn``) — distinguish with
-        ``isinstance(edge, str)``, there is no separate conditional-edges
-        structure. The entry edge is ``edges[START]`` when present.
+        Each value is a static target name, a bare conditional callable, or a
+        :class:`ConditionalEdge` carrying the same runtime router plus optional
+        declarative target metadata.
         """
         return MappingProxyType(self._edges)
+
+    def describe(self) -> GraphSpec:
+        """Return an immutable structural description without executing code."""
+        return _describe_topology(self._nodes, self._edges, self._max_steps)
+
+    def validate(self):
+        """Return the static GraphSpec validation report for this snapshot."""
+        from perpetua_core.graph.lint import lint_graph_spec
+
+        return lint_graph_spec(self.describe())
 
     async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
         """Run the graph to normal completion or structural interruption."""
@@ -220,7 +283,12 @@ class CompiledGraph:
             ) from None
 
     def _resolve_edge(self, edge: Edge, state: PerpetuaState) -> str:
-        target = edge(state) if callable(edge) else edge
+        if isinstance(edge, ConditionalEdge):
+            target = edge.router(state)
+        elif callable(edge):
+            target = edge(state)
+        else:
+            target = edge
         if not isinstance(target, str):
             raise TypeError(
                 "MiniGraph edge resolved to "
@@ -257,14 +325,32 @@ class MiniGraph:
     def compile(self) -> CompiledGraph:
         return CompiledGraph(self._nodes, self._edges, self._max_steps)
 
+    def compile_validated(self) -> CompiledGraph:
+        """Compile and fail closed if the detached GraphSpec is invalid."""
+        from perpetua_core.graph.lint import validate_graph_spec
+
+        compiled = self.compile()
+        validate_graph_spec(compiled.describe())
+        return compiled
+
+    def describe(self) -> GraphSpec:
+        """Return an immutable structural description without executing code."""
+        return _describe_topology(self._nodes, self._edges, self._max_steps)
+
+    def validate(self):
+        """Return the static GraphSpec validation report for this builder."""
+        from perpetua_core.graph.lint import lint_graph_spec
+
+        return lint_graph_spec(self.describe())
+
     @property
     def nodes(self) -> Mapping[str, NodeFn]:
-        """Read-only view of the builder's nodes so far. See :attr:`CompiledGraph.nodes`."""
+        """Read-only view of the builder's nodes so far. See CompiledGraph.nodes."""
         return MappingProxyType(self._nodes)
 
     @property
     def edges(self) -> Mapping[str, Edge]:
-        """Read-only view of the builder's edges so far. See :attr:`CompiledGraph.edges`."""
+        """Read-only view of the builder's edges so far. See CompiledGraph.edges."""
         return MappingProxyType(self._edges)
 
     async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
