@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, TypeAlias
 
@@ -19,6 +20,8 @@ FrozenJSON: TypeAlias = JSONScalar | tuple["FrozenJSON", ...] | Mapping[str, "Fr
 
 
 def _freeze_json(value: Any) -> FrozenJSON:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise TypeError("GraphSpec metadata floats must be finite")
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (list, tuple)):
@@ -117,8 +120,8 @@ class EdgeSpec:
         }
 
 
-def _node_sort_key(node: NodeSpec) -> tuple[str, str]:
-    return node.name, node.implementation_ref or ""
+def _node_sort_key(node: NodeSpec) -> tuple[str, str, str]:
+    return node.name, node.implementation_ref or "", _canonical_json(_thaw_json(node.metadata))
 
 
 def _edge_sort_key(edge: EdgeSpec) -> tuple[Any, ...]:
@@ -128,6 +131,7 @@ def _edge_sort_key(edge: EdgeSpec) -> tuple[Any, ...]:
         edge.target or "",
         edge.router_ref or "",
         edge.declared_targets,
+        _canonical_json(_thaw_json(edge.metadata)),
     )
 
 
@@ -266,7 +270,9 @@ class GraphSpec:
             metadata=payload.get("metadata", {}),
         )
         supplied_graph_id = payload.get("graph_id")
-        if supplied_graph_id is not None and supplied_graph_id != spec.graph_id:
+        if not isinstance(supplied_graph_id, str):
+            raise ValueError("GraphSpec graph_id is required")
+        if supplied_graph_id != spec.graph_id:
             raise ValueError(
                 "GraphSpec graph_id mismatch: payload content does not match identity"
             )

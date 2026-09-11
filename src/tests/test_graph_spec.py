@@ -104,6 +104,16 @@ def test_graph_id_tampering_is_rejected() -> None:
         GraphSpec.from_dict(payload)
 
 
+def test_graph_spec_rejects_missing_identity_and_nonfinite_metadata() -> None:
+    payload = _basic_spec().to_dict()
+    payload.pop("graph_id")
+    with pytest.raises(ValueError, match="graph_id is required"):
+        GraphSpec.from_dict(payload)
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(TypeError, match="floats must be finite"):
+            GraphSpec.create(max_steps=1, metadata={"value": value})
+
+
 def test_non_json_metadata_is_rejected() -> None:
     with pytest.raises(TypeError, match="JSON-compatible"):
         NodeSpec("a", metadata={"bad": object()})
