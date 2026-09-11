@@ -79,6 +79,13 @@ def test_graph_id_is_stable_across_input_order() -> None:
     assert a.to_dict() == b.to_dict()
 
 
+def test_graph_id_is_stable_when_equal_topology_records_differ_in_metadata() -> None:
+    nodes = (NodeSpec("a", metadata={"rank": 2}), NodeSpec("a", metadata={"rank": 1}))
+    assert GraphSpec.create(max_steps=1, nodes=nodes).graph_id == GraphSpec.create(
+        max_steps=1, nodes=tuple(reversed(nodes))
+    ).graph_id
+
+
 def test_graph_spec_round_trips_json() -> None:
     spec = _basic_spec()
 
