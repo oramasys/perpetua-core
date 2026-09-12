@@ -164,3 +164,16 @@ def test_module_has_no_hard_agate_dependency_at_import_time():
     importlib.reload(perpetua_core.policy)
 
     assert "agate" not in sys.modules
+
+
+def test_core_does_not_declare_agate_as_a_runtime_dependency():
+    """Core must not import upward into the hardware-policy authority.
+
+    The deprecated adapter remains usable only in environments that install
+    Agate explicitly; new consumers must depend on Agate directly.
+    """
+    project = Path(__file__).parents[2] / "pyproject.toml"
+    text = project.read_text(encoding="utf-8")
+    runtime_dependencies = text.split("[project.optional-dependencies]", 1)[0]
+
+    assert "oramasys-agate" not in runtime_dependencies
