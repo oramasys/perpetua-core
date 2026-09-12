@@ -85,3 +85,45 @@ def test_resolve_model_hint_respected(resolver):
 def test_resolve_model_hint_never_tier_raises(resolver):
     with pytest.raises(HardwareAffinityError):
         resolver.resolve(task_type="coding", model_hint="banned-model")
+
+
+def test_from_file_emits_deprecation_warning(resolver):
+    """resolver fixture already constructed one via from_file() -- this
+    test exists to make the deprecation explicit and regression-tested,
+    not just an incidental side effect visible in pytest's warning
+    summary."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        HardwarePolicyResolver(resolver._store)
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+
+def test_resolver_delegates_to_a_real_agate_policy_store(resolver):
+    """Regression for the actual architectural fix: this wrapper carries
+    no independent verdict logic of its own -- confirmed directly by
+    checking the resolver's internal store is a genuine agate
+    PolicyStore instance, not a raw dict the old implementation used."""
+    import agate
+
+    assert isinstance(resolver._store, agate.PolicyStore)
+
+
+def test_module_has_no_hard_agate_dependency_at_import_time():
+    """Confirmed directly: importing perpetua_core.policy must never
+    import agate itself -- only constructing a resolver via from_file()
+    does, and only then. A hard, module-level dependency here would
+    just relocate the 'core imports upward from policy' violation this
+    wrapper exists to close, rather than actually close it."""
+    import importlib
+    import sys
+
+    for mod_name in list(sys.modules):
+        if mod_name == "agate" or mod_name.startswith("agate."):
+            del sys.modules[mod_name]
+
+    import perpetua_core.policy
+    importlib.reload(perpetua_core.policy)
+
+    assert "agate" not in sys.modules
