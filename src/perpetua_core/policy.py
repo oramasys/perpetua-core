@@ -63,7 +63,7 @@ class HardwarePolicyResolver:
     the logic that reads it."""
 
     def __init__(self, store) -> None:
-        self._store = store
+        self._store = self._normalize_store(store)
         warnings.warn(
             "perpetua_core.policy.HardwarePolicyResolver is deprecated; "
             "use agate.load_policy() / agate.PolicyStore directly.",
@@ -75,6 +75,41 @@ class HardwarePolicyResolver:
     def from_file(cls, path: str | Path) -> "HardwarePolicyResolver":
         agate = _import_agate()
         return cls(agate.load_policy(path))
+
+    @staticmethod
+    def _normalize_store(store):
+        """Accept either a real agate.PolicyStore or the legacy raw
+        mapping this wrapper's callers may still hold from before the
+        agate delegation existed. A dict has no .models/.routing
+        attributes, so leaving it unconverted here makes the FIRST call
+        to check_affinity()/resolve() raise AttributeError instead of
+        working -- deferring failure to first use instead of surfacing
+        it at construction, and silently changing behavior for any
+        caller that never migrated off passing a raw mapping. Building
+        the same ModelSpec/PolicyStore shape agate.load_policy() itself
+        produces (rather than a separate ad-hoc adapter) keeps this
+        wrapper's own claim -- 'no independent verdict logic of its
+        own' -- true after this fix too.
+        """
+        if not isinstance(store, dict):
+            return store
+        agate = _import_agate()
+        models = {
+            name: agate.ModelSpec(
+                name=name,
+                mac=spec.get("mac", "NEVER"),
+                windows=spec.get("windows", "NEVER"),
+                shared=spec.get("shared", "NEVER"),
+                context=spec.get("context"),
+                roles=tuple(spec.get("roles", [])),
+                notes=spec.get("notes"),
+            )
+            for name, spec in store.get("models", {}).items()
+        }
+        routing = dict(store.get("routing", {}))
+        return agate.PolicyStore(
+            version=store.get("version", 1), models=models, routing=routing
+        )
 
     def check_affinity(self, *, model: str, target_tier: str) -> Verdict:
         spec = self._store.models.get(model)

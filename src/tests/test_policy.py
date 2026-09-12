@@ -110,6 +110,43 @@ def test_resolver_delegates_to_a_real_agate_policy_store(resolver):
     assert isinstance(resolver._store, agate.PolicyStore)
 
 
+def test_constructor_accepts_legacy_raw_policy_mapping():
+    """CodeRabbit PR#5 review: __init__ used to store whatever it was
+    given verbatim. A caller constructing HardwarePolicyResolver
+    directly from a raw dict (the pre-refactor shape this wrapper's own
+    callers may still hold, not going through from_file()) then hit
+    AttributeError the first time check_affinity()/resolve() did
+    self._store.models -- a plain dict has no .models attribute. The
+    constructor must normalize a raw mapping into the same
+    agate.PolicyStore shape from_file() produces, preserving behavior."""
+    import yaml
+
+    raw = yaml.safe_load(POLICY_YAML)
+    with pytest.warns(DeprecationWarning):
+        resolver = HardwarePolicyResolver(raw)
+
+    assert resolver.check_affinity(model="big-model", target_tier="windows") == "PREFER"
+    with pytest.raises(HardwareAffinityError):
+        resolver.check_affinity(model="big-model", target_tier="mac")
+
+    decision = resolver.resolve(task_type="reasoning", optimize_for="speed")
+    assert decision.model == "small-model"
+    assert decision.hardware_tier == "mac"
+
+
+def test_legacy_raw_policy_mapping_normalizes_to_a_real_policy_store():
+    """The normalized result must be indistinguishable from from_file()'s
+    own output -- not a separate ad-hoc shape that happens to also work."""
+    import agate
+    import yaml
+
+    raw = yaml.safe_load(POLICY_YAML)
+    resolver = HardwarePolicyResolver(raw)
+
+    assert isinstance(resolver._store, agate.PolicyStore)
+    assert isinstance(resolver._store.models["big-model"], agate.ModelSpec)
+
+
 def test_module_has_no_hard_agate_dependency_at_import_time():
     """Confirmed directly: importing perpetua_core.policy must never
     import agate itself -- only constructing a resolver via from_file()
