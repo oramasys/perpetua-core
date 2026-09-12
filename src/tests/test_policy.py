@@ -1,4 +1,7 @@
 """TDD: HardwarePolicyResolver — write failing tests first."""
+import re
+import tomllib
+
 import pytest
 from pathlib import Path
 from perpetua_core.policy import HardwarePolicyResolver, HardwareAffinityError
@@ -173,7 +176,15 @@ def test_core_does_not_declare_agate_as_a_runtime_dependency():
     Agate explicitly; new consumers must depend on Agate directly.
     """
     project = Path(__file__).parents[2] / "pyproject.toml"
-    text = project.read_text(encoding="utf-8")
-    runtime_dependencies = text.split("[project.optional-dependencies]", 1)[0]
+    metadata = tomllib.loads(project.read_text(encoding="utf-8"))
+    runtime_dependencies = metadata["project"]["dependencies"]
+    dependency_names = {
+        re.sub(
+            r"[-_.]+",
+            "-",
+            dependency.split("@", 1)[0].split(";", 1)[0].strip().split()[0].lower(),
+        )
+        for dependency in runtime_dependencies
+    }
 
-    assert "oramasys-agate" not in runtime_dependencies
+    assert "oramasys-agate" not in dependency_names
