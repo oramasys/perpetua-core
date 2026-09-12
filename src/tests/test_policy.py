@@ -28,6 +28,15 @@ routing:
   default: small-model
 """
 
+_REQUIREMENT_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+
+
+def _canonical_requirement_name(requirement: str) -> str:
+    """Extract and PEP 503/508-normalize a requirement's distribution name."""
+    match = _REQUIREMENT_NAME.match(requirement.strip())
+    assert match is not None, f"Unable to parse dependency name: {requirement!r}"
+    return re.sub(r"[-_.]+", "-", match.group(0)).lower()
+
 
 @pytest.fixture
 def resolver(tmp_path):
@@ -169,6 +178,24 @@ def test_module_has_no_hard_agate_dependency_at_import_time():
     assert "agate" not in sys.modules
 
 
+@pytest.mark.parametrize(
+    ("requirement", "expected"),
+    [
+        ("oramasys-agate", "oramasys-agate"),
+        ("oramasys_agate>=0.1", "oramasys-agate"),
+        ("oramasys.agate[tests]~=0.1", "oramasys-agate"),
+        (
+            "oramasys_agate @ git+https://github.com/oramasys/agate.git@deadbeef",
+            "oramasys-agate",
+        ),
+    ],
+)
+def test_requirement_name_parser_canonicalizes_equivalent_spellings(
+    requirement, expected
+):
+    assert _canonical_requirement_name(requirement) == expected
+
+
 def test_core_does_not_declare_agate_as_a_runtime_dependency():
     """Core must not import upward into the hardware-policy authority.
 
@@ -177,14 +204,23 @@ def test_core_does_not_declare_agate_as_a_runtime_dependency():
     """
     project = Path(__file__).parents[2] / "pyproject.toml"
     metadata = tomllib.loads(project.read_text(encoding="utf-8"))
-    runtime_dependencies = metadata["project"]["dependencies"]
     dependency_names = {
-        re.sub(
-            r"[-_.]+",
-            "-",
-            dependency.split("@", 1)[0].split(";", 1)[0].strip().split()[0].lower(),
-        )
-        for dependency in runtime_dependencies
+        _canonical_requirement_name(dependency)
+        for dependency in metadata["project"]["dependencies"]
+    }
+
+    assert "oramasys-agate" not in dependency_names
+
+
+def test_core_does_not_publish_agate_as_an_optional_dependency():
+    """Core must not reintroduce Agate through any published extra."""
+    project = Path(__file__).parents[2] / "pyproject.toml"
+    metadata = tomllib.loads(project.read_text(encoding="utf-8"))
+    optional_dependencies = metadata["project"].get("optional-dependencies", {})
+    dependency_names = {
+        _canonical_requirement_name(dependency)
+        for dependencies in optional_dependencies.values()
+        for dependency in dependencies
     }
 
     assert "oramasys-agate" not in dependency_names
