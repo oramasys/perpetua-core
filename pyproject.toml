@@ -23,18 +23,6 @@ dev = [
     "pytest-cov>=6.0",
     "hypothesis>=6.0",
 ]
-# Opt-in only, for exercising perpetua_core.policy.HardwarePolicyResolver's
-# real delegation to a live agate.PolicyStore. Deliberately not part of
-# dependencies or dev: this package declares no dependency, runtime or
-# dev, on agate -- Core never imports upward into the policy authority.
-# A legacy caller who actually constructs HardwarePolicyResolver installs
-# this (or oramasys-agate directly) themselves; without it, from_file()
-# raises a clear ImportError naming the migration path instead of failing
-# opaquely. Named distinctly from dev, not folded into it, so `pip install
-# -e .[dev]` alone continues to prove Core has no such dependency.
-test-agate-compat = [
-    "oramasys-agate @ git+https://github.com/oramasys/agate.git@41a0da9d52e0131049a1469234ac56f6990fc635",
-]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
