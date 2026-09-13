@@ -1,0 +1,2 @@
+# External CI fixture only. Core must not publish Agate as a runtime or optional dependency.
+oramasys-agate @ git+https://github.com/oramasys/agate.git@41a0da9d52e0131049a1469234ac56f6990fc635
