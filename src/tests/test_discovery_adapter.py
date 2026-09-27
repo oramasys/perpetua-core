@@ -62,6 +62,28 @@ def test_registry_record_and_online_query():
     assert offline.authorizes_dial is False
 
 
+def test_later_record_revokes_stale_online():
+    registry = BackendRegistry()
+    stale = Backend(
+        name="ollama-local",
+        base_url="http://127.0.0.1:11434/v1",
+        kind=BackendKind.OLLAMA,
+        models=("m",),
+        health=BackendHealth.ONLINE,
+    )
+    failed = Backend(
+        name="ollama-local",
+        base_url="http://127.0.0.1:11434/v1",
+        kind=BackendKind.OLLAMA,
+        models=(),
+        health=BackendHealth.OFFLINE,
+    )
+    registry.record(stale)
+    registry.record(failed)
+    assert registry.online() == []
+    assert registry.find("ollama-local") is failed
+
+
 def _imports_removed_telos(name: str) -> bool:
     """True for ``telos`` and the removed ``oramasys_telos`` distribution."""
     root = name.split(".", 1)[0]
