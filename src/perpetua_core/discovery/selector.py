@@ -39,6 +39,7 @@ def select_backend(
     task_type: TaskType,
     target_tier: Tier,
 ) -> Backend:
+    """Pick a routing candidate. ``health`` is advisory and does not authorize ``base_url``."""
     online = registry.online()
 
     # 1. model_hint always wins (mirrors excluded — they cannot run heavy Win-only models)

@@ -20,6 +20,8 @@ class BackendHealth(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class Backend:
+    """Advisory backend observation. Health is routing state, not a dial grant."""
+
     name: str
     base_url: str
     kind: BackendKind
@@ -29,10 +31,18 @@ class Backend:
 
     @property
     def host(self) -> str:
+        """Hostname from ``base_url``, or an empty string when it has none."""
         return urlparse(self.base_url).hostname or ""
 
     def is_targetable_by_ip(self, ip: str) -> bool:
+        """True when ``ip`` is this observation's hostname."""
         return self.host == ip
 
+    @property
+    def authorizes_dial(self) -> bool:
+        """Routing health is not a dial grant. Telos authorizes endpoint use."""
+        return False
+
     def with_health(self, health: BackendHealth, *, now: datetime) -> "Backend":
+        """Return a copy with a new advisory health and observation time."""
         return replace(self, health=health, last_seen=now)

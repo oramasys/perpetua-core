@@ -23,25 +23,34 @@ def _online(name: str, url: str, kind: BackendKind, models: list[str]) -> Backen
 @pytest.fixture
 def reg():
     r = BackendRegistry()
-    r._backends["ollama-local"] = _online(
-        "ollama-local", "http://localhost:11434/v1", BackendKind.OLLAMA, ["qwen3.5:9b-nvfp4"]
+    r.record(
+        _online(
+            "ollama-local",
+            "http://localhost:11434/v1",
+            BackendKind.OLLAMA,
+            ["qwen3.5:9b-nvfp4"],
+        )
     )
-    r._backends["lmstudio-win"] = _online(
-        "lmstudio-win",
-        "http://192.168.254.103:1234/v1",
-        BackendKind.LMSTUDIO,
-        ["qwen3.5-27b-claude-4.6-opus-reasoning-distilled-v2"],
+    r.record(
+        _online(
+            "lmstudio-win",
+            "http://192.168.254.103:1234/v1",
+            BackendKind.LMSTUDIO,
+            ["qwen3.5-27b-claude-4.6-opus-reasoning-distilled-v2"],
+        )
     )
     return r
 
 
 @pytest.fixture
 def reg_with_mirror(reg):
-    reg._backends["lmstudio-mac"] = _online(
-        "lmstudio-mac",
-        "http://localhost:1234/v1",
-        BackendKind.LMSTUDIO,
-        ["qwen3.5-27b-claude-4.6-opus-reasoning-distilled-v2"],
+    reg.record(
+        _online(
+            "lmstudio-mac",
+            "http://localhost:1234/v1",
+            BackendKind.LMSTUDIO,
+            ["qwen3.5-27b-claude-4.6-opus-reasoning-distilled-v2"],
+        )
     )
     return reg
 
@@ -70,11 +79,21 @@ def test_mirror_never_selected_for_shared_coding(reg_with_mirror):
 def test_mirror_excluded_even_when_only_lmstudio_online():
     """If lmstudio-win is offline, shared+coding falls back to Ollama, never the mirror."""
     r = BackendRegistry()
-    r._backends["ollama-local"] = _online(
-        "ollama-local", "http://localhost:11434/v1", BackendKind.OLLAMA, ["qwen3.5:9b-nvfp4"]
+    r.record(
+        _online(
+            "ollama-local",
+            "http://localhost:11434/v1",
+            BackendKind.OLLAMA,
+            ["qwen3.5:9b-nvfp4"],
+        )
     )
-    r._backends["lmstudio-mac"] = _online(
-        "lmstudio-mac", "http://localhost:1234/v1", BackendKind.LMSTUDIO, ["heavy-model"]
+    r.record(
+        _online(
+            "lmstudio-mac",
+            "http://localhost:1234/v1",
+            BackendKind.LMSTUDIO,
+            ["heavy-model"],
+        )
     )
     b = select_backend(r, model_hint=None, task_type="coding", target_tier="shared")
     assert b.name == "ollama-local"  # graceful fallback, not the mirror
@@ -83,11 +102,13 @@ def test_mirror_excluded_even_when_only_lmstudio_online():
 def test_model_hint_skips_mirror():
     """model_hint must not route to a mirror even if model appears there."""
     r = BackendRegistry()
-    r._backends["lmstudio-mac"] = _online(
-        "lmstudio-mac",
-        "http://localhost:1234/v1",
-        BackendKind.LMSTUDIO,
-        ["qwen3.5-27b-claude-4.6-opus-reasoning-distilled-v2"],
+    r.record(
+        _online(
+            "lmstudio-mac",
+            "http://localhost:1234/v1",
+            BackendKind.LMSTUDIO,
+            ["qwen3.5-27b-claude-4.6-opus-reasoning-distilled-v2"],
+        )
     )
     with pytest.raises(NoBackendAvailableError):
         select_backend(
