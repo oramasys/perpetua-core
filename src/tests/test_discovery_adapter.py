@@ -71,8 +71,10 @@ def _tree_imports_removed_telos(tree: ast.AST) -> bool:
         if isinstance(node, ast.Import):
             if any(_imports_removed_telos(alias.name) for alias in node.names):
                 return True
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            if _imports_removed_telos(node.module):
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and _imports_removed_telos(node.module):
+                return True
+            if any(_imports_removed_telos(alias.name) for alias in node.names):
                 return True
     return False
 
@@ -80,16 +82,13 @@ def _tree_imports_removed_telos(tree: ast.AST) -> bool:
 def test_core_discovery_has_no_telos_dependency():
     """C0 REJECT_CORE_TELOS_DEP: kernel discovery must stay Telos-free."""
     import perpetua_core.discovery as discovery
-    import perpetua_core.discovery.backend as backend
-    import perpetua_core.discovery.registry as registry
-    import perpetua_core.discovery.selector as selector
-    import perpetua_core.discovery.errors as errors
 
-    for mod in (discovery, backend, registry, selector, errors):
-        assert "telos" not in mod.__dict__
-        assert "oramasys_telos" not in mod.__dict__
-        tree = ast.parse(Path(mod.__file__).read_text())
-        assert not _tree_imports_removed_telos(tree)
+    package = Path(discovery.__file__).resolve().parent
+    sources = sorted(package.glob("*.py"))
+    assert sources
+    for path in sources:
+        tree = ast.parse(path.read_text())
+        assert not _tree_imports_removed_telos(tree), path.name
 
 
 def test_telos_import_guard_rejects_removed_namespace():
@@ -102,7 +101,14 @@ def test_telos_import_guard_rejects_removed_namespace():
         "from telos import health_probe\n",
         "from oramasys_telos import health_probe\n",
         "from oramasys_telos.probe import health_probe\n",
+        "from somewhere import telos\n",
+        "from somewhere import oramasys_telos\n",
     )
     for source in forbidden:
         assert _tree_imports_removed_telos(ast.parse(source))
-    assert not _tree_imports_removed_telos(ast.parse("import perpetua_core.discovery\n"))
+    allowed = (
+        "import perpetua_core.discovery\n",
+        "from perpetua_core.discovery import Backend\n",
+    )
+    for source in allowed:
+        assert not _tree_imports_removed_telos(ast.parse(source))
