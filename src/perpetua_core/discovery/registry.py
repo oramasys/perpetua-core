@@ -12,11 +12,12 @@ class BackendRegistry:
         return list(self._backends.values())
 
     def online(self) -> list[Backend]:
+        """Advisory routing set. ``ONLINE`` here does not authorize a dial."""
         return [b for b in self._backends.values() if b.health is BackendHealth.ONLINE]
 
     def find(self, name: str) -> Backend | None:
         return self._backends.get(name)
 
     def record(self, backend: Backend) -> None:
-        """Store a backend observation without performing network I/O."""
+        """Store an advisory observation. This method does not probe or authorize."""
         self._backends[backend.name] = backend

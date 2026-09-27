@@ -58,6 +58,8 @@ def test_registry_record_and_online_query():
     assert registry.find("ollama-local") is online
     assert registry.online() == [online]
     assert {b.name for b in registry.all()} == {"ollama-local", "down"}
+    assert online.authorizes_dial is False
+    assert offline.authorizes_dial is False
 
 
 def _imports_removed_telos(name: str) -> bool:

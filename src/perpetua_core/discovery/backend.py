@@ -34,5 +34,10 @@ class Backend:
     def is_targetable_by_ip(self, ip: str) -> bool:
         return self.host == ip
 
+    @property
+    def authorizes_dial(self) -> bool:
+        """Routing health is not a dial grant. Telos authorizes endpoint use."""
+        return False
+
     def with_health(self, health: BackendHealth, *, now: datetime) -> "Backend":
         return replace(self, health=health, last_seen=now)
