@@ -137,3 +137,22 @@ def test_scanner_adversarial_cases(source: str, kind: str) -> None:
 def test_lookalikes_are_not_frameworks() -> None:
     """Do not flag Pydantic itself or similarly named independent modules."""
     assert classify("import pydantic\nimport langgraphish\nimport langchainish\nimport pydantic_aiish") == []
+
+
+@pytest.mark.parametrize("expression", [
+    '"lang" + "graph"',
+    '("langchain_" + "text_splitters")',
+    'f"langgraph"',
+])
+def test_computed_literal_imports_in_lazy_functions_are_detected(expression: str) -> None:
+    """A lazy function must not conceal a statically computable framework import."""
+    findings = classify(f"def load():\n importlib.import_module({expression})")
+    assert len(findings) == 1
+    assert findings[0][1] == "DYNAMIC"
+
+
+def test_unresolved_dynamic_import_requires_explicit_review() -> None:
+    """A nonliteral argument must produce evidence rather than silently disappear."""
+    assert classify("def load(name):\n importlib.import_module(name)") == [
+        ("<unresolved>", "DYNAMIC_UNRESOLVED")
+    ]
