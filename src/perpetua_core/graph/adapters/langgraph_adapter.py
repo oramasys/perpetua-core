@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from perpetua_core.graph.engine import END, START, CompiledGraph, MiniGraph
+from perpetua_core.graph.engine import END, START, CompiledGraph, ConditionalEdge, MiniGraph
 
 
 class LangGraphExporter:
@@ -48,10 +48,12 @@ class LangGraphExporter:
             from langgraph.graph import END as LG_END
             from langgraph.graph import START as LG_START
             from langgraph.graph import StateGraph
-        except ImportError as exc:
-            raise ImportError(
+        except ModuleNotFoundError as exc:
+            if exc.name != "langgraph":
+                raise
+            raise ModuleNotFoundError(
                 "langgraph is not installed. Install with `pip install langgraph` "
-                "to use LangGraphExporter.to_langgraph()."
+                "to use LangGraphExporter.to_langgraph().", name="langgraph"
             ) from exc
 
         compiled: CompiledGraph = graph.compile() if isinstance(graph, MiniGraph) else graph
@@ -71,10 +73,20 @@ class LangGraphExporter:
                 # add_conditional_edges routes by return value directly when
                 # no explicit mapping is given, so END needs translating
                 # inside a thin wrapper rather than passed through raw.
-                def _route(state: Any, _edge: Any = edge) -> Any:
+                router = edge.router if isinstance(edge, ConditionalEdge) else edge
+
+                def _route(state: Any, _edge: Any = router) -> Any:
+                    """Translate the native terminal sentinel at the export boundary."""
                     target = _edge(state)
                     return LG_END if target == END else target
 
-                builder.add_conditional_edges(lg_source, _route)
+                if isinstance(edge, ConditionalEdge) and edge.declared_targets:
+                    path_map = {
+                        LG_END if target == END else target: LG_END if target == END else target
+                        for target in edge.declared_targets
+                    }
+                    builder.add_conditional_edges(lg_source, _route, path_map)
+                else:
+                    builder.add_conditional_edges(lg_source, _route)
 
         return builder.compile()

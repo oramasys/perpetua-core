@@ -76,7 +76,7 @@ def test_missing_langgraph_raises_clear_import_error(monkeypatch: pytest.MonkeyP
 
     def fake_import(name: str, *args: object, **kwargs: object) -> object:
         if name == "langgraph.graph":
-            raise ImportError("simulated: langgraph not installed")
+            raise ModuleNotFoundError("simulated: langgraph not installed", name="langgraph")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
@@ -88,3 +88,19 @@ def test_missing_langgraph_raises_clear_import_error(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(ImportError, match="pip install langgraph"):
         LangGraphExporter.to_langgraph(g, PerpetuaState)
+
+
+def test_broken_langgraph_dependency_is_not_reported_as_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Installed optional frameworks must surface broken transitive imports verbatim."""
+    import builtins
+    real_import = builtins.__import__
+    failure = ModuleNotFoundError("broken dependency", name="broken_transitive")
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        """Plant a transitive failure at the lazy bridge boundary."""
+        if name == "langgraph.graph":
+            raise failure
+        return real_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ModuleNotFoundError) as error:
+        LangGraphExporter.to_langgraph(MiniGraph(), PerpetuaState)
+    assert error.value is failure
