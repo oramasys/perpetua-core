@@ -568,3 +568,21 @@ def test_policy_of_the_join_changes_graph_id() -> None:
         ).describe().graph_id
         != base.graph_id
     )
+
+
+async def test_plugins_receive_commit_provenance() -> None:
+    from perpetua_core.graph.plugins.observer import run_with_plugins
+
+    seen: list = []
+
+    class Spy:
+        def on_observation(self, observation) -> None:
+            if observation.event.kind == "superstep.commit":
+                seen.append(observation.provenance)
+
+    graph = region(
+        {"a": branch([m("A")]), "b": branch([m("B")])},
+        reducers={"messages": Reducer("concat")},
+    )
+    await run_with_plugins(graph, fresh(), [Spy()])
+    assert seen == [{"messages": ("a", "b")}]

@@ -40,6 +40,7 @@ def _detached_observation(observation: GraphObservation) -> GraphObservation:
         event=observation.event,
         state=observation.state.model_copy(deep=True),
         delta=deepcopy(observation.delta),
+        provenance=deepcopy(observation.provenance),
     )
 
 

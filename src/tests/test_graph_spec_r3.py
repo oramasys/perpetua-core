@@ -225,3 +225,16 @@ def test_lint_flags_schema_feature_mismatch_and_hash_binding() -> None:
     wrong = bypass(spec, reducers=(ReducerSpec("messages", "last"),))
     assert "GS014" in codes(wrong)
     assert compute_graph_id  # hash binding covered via GS014 above
+
+
+def test_invalid_default_joins_are_kept_so_lint_can_report_them() -> None:
+    spec = region_spec(joins=(JoinSpec("ghost", "all"),))
+    assert any(j.source == "ghost" for j in spec.joins)
+    assert "GS207" in codes(spec)
+    dup = region_spec(joins=(JoinSpec("plan", "all"), JoinSpec("plan", "any")))
+    assert len([j for j in dup.joins if j.source == "plan"]) == 2
+    assert "GS208" in codes(dup)
+
+
+def test_sole_default_join_on_a_fanout_source_is_still_dropped() -> None:
+    assert region_spec(joins=(JoinSpec("plan", "all"),)).graph_id == region_spec(joins=()).graph_id

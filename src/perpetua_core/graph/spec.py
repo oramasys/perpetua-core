@@ -292,7 +292,8 @@ class GraphSpec:
 
         Fan-out edges, reducers and joins require schema "2". A spec that uses
         none of them is schema "1", so its ``graph_id`` is unchanged. The
-        implied default join (``all``) is dropped so one meaning has one hash.
+        implied default join (``all``, sole join of a fan-out source) is dropped so
+        one meaning has one hash; invalid declarations are kept for lint.
         """
         frozen_metadata = _freeze_json(dict(metadata or {}))
         if not isinstance(frozen_metadata, Mapping):
@@ -300,8 +301,25 @@ class GraphSpec:
         canonical_nodes = tuple(sorted(nodes, key=_node_sort_key))
         canonical_edges = tuple(sorted(edges, key=_edge_sort_key))
         canonical_reducers = tuple(sorted(reducers, key=lambda r: r.field))
+        fanout_sources = {e.source for e in canonical_edges if e.kind == "fanout"}
+        join_counts: dict[str, int] = {}
+        for j in joins:
+            join_counts[j.source] = join_counts.get(j.source, 0) + 1
+        # Drop only a valid implied default: the sole join of a real fan-out
+        # source. Orphan or duplicate declarations stay so lint can report them.
         canonical_joins = tuple(
-            sorted((j for j in joins if not j.is_default), key=lambda j: j.source)
+            sorted(
+                (
+                    j
+                    for j in joins
+                    if not (
+                        j.is_default
+                        and j.source in fanout_sources
+                        and join_counts[j.source] == 1
+                    )
+                ),
+                key=lambda j: (j.source, j.kind),
+            )
         )
         uses_r3 = bool(
             canonical_reducers
