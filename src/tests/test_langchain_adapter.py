@@ -212,3 +212,48 @@ def test_abatch_without_max_concurrency_runs_fully_concurrent() -> None:
 
     assert len(results) == 6
     assert peak_concurrent == 6
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, False, 1.5, "2"])
+@pytest.mark.parametrize("empty", [False, True])
+def test_abatch_rejects_invalid_concurrency_before_running_nodes(
+    limit: object, empty: bool,
+) -> None:
+    """Invalid bounds must fail fast, even for empty input, without effects."""
+    calls: list[str] = []
+
+    def node(state: PerpetuaState) -> dict[str, object]:
+        calls.append(state.session_id)
+        return {}
+
+    graph = MiniGraph().add_node("a", node)
+    graph.add_edge(START, "a").add_edge("a", END)
+    adapter = LangChainRunnableAdapter(graph)
+
+    async def run() -> None:
+        with pytest.raises(ValueError, match="max_concurrency must be a positive integer"):
+            await asyncio.wait_for(
+                adapter.abatch([] if empty else [make_state()], {"max_concurrency": limit}),
+                timeout=0.2,
+            )
+
+    asyncio.run(run())
+    assert calls == []
+
+
+@pytest.mark.parametrize("limit", [None, 1, 2, 100])
+def test_abatch_valid_bounds_preserve_input_order(limit: int | None) -> None:
+    """Positive limits and None retain graph behavior and input ordering."""
+    adapter = LangChainRunnableAdapter(_linear_graph())
+    results = asyncio.run(adapter.abatch(
+        [make_state(session_id="first"), make_state(session_id="second")],
+        {"max_concurrency": limit},
+    ))
+    assert [result.session_id for result in results] == ["first", "second"]
+    assert all(result.scratchpad == {"a": True, "b": True} for result in results)
+
+
+def test_batch_rejects_zero_concurrency() -> None:
+    """The sync bridge exposes the same fail-fast validation contract."""
+    with pytest.raises(ValueError, match="max_concurrency must be a positive integer"):
+        LangChainRunnableAdapter(_linear_graph()).batch([], {"max_concurrency": 0})

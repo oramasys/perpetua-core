@@ -78,6 +78,10 @@ class LangChainRunnableAdapter:
         when the caller supplies it. Omitting it preserves the prior
         behavior exactly -- fully concurrent via ``asyncio.gather``, no
         artificial bound the caller didn't ask for.
+
+        A supplied bound must be a positive integer (not a bool). Invalid
+        bounds raise ``ValueError`` before any graph executes, including
+        for an empty input list. ``None`` means unbounded.
         """
         max_concurrency = (config or {}).get("max_concurrency")
         if max_concurrency is None:
@@ -85,6 +89,12 @@ class LangChainRunnableAdapter:
                 await asyncio.gather(*(self.ainvoke(item, config=config) for item in inputs))
             )
 
+        if (
+            isinstance(max_concurrency, bool)
+            or not isinstance(max_concurrency, int)
+            or max_concurrency <= 0
+        ):
+            raise ValueError("max_concurrency must be a positive integer")
         semaphore = asyncio.Semaphore(max_concurrency)
 
         async def _bounded(item: PerpetuaState | dict[str, Any]) -> PerpetuaState:
