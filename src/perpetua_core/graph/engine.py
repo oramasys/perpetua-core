@@ -1,22 +1,35 @@
 """MiniGraph — typed, bounded state-machine kernel.
 
 The kernel owns only universal graph execution mechanics: named nodes, static
-or conditional edges, START/END sentinels, bounded traversal, structural
-interrupts, detached compilation, and structural execution observations.
+or conditional edges, single-level fan-out regions with reducers and joins,
+START/END sentinels, bounded traversal, structural interrupts, detached
+compilation, and structural execution observations.
 
 GraphSpec description/linting is declarative and never becomes a second
-scheduler. Persistence, retries, reducers, provider policy, telemetry export,
-and graph optimization remain outside this module.
+scheduler. A fan-out region runs inside the same ``_run`` loop. Persistence,
+retries, provider policy, telemetry export, and graph optimization remain
+outside this module.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
-from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec, stable_callable_ref
+from perpetua_core.graph.reducers import DEFAULT_REDUCER, Reducer, reduce_field
+from perpetua_core.graph.spec import (
+    JOIN_KINDS,
+    EdgeSpec,
+    GraphSpec,
+    JoinKind,
+    JoinSpec,
+    NodeSpec,
+    ReducerSpec,
+    stable_callable_ref,
+)
 from perpetua_core.state import PerpetuaState
 
 START = "__start__"
@@ -49,9 +62,81 @@ class ConditionalEdge:
         )
 
 
-Edge: TypeAlias = str | EdgeFn | ConditionalEdge
+@dataclass(frozen=True, slots=True)
+class BranchOutcome:
+    """What a custom join sees about one settled branch; never its delta."""
+
+    name: str
+    ok: bool
+    error_type: str | None = None
+
+
+JoinAdmitFn: TypeAlias = Callable[[tuple[BranchOutcome, ...]], Iterable[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class Join:
+    """Which settled branches of a region are admitted.
+
+    Every branch settles before the join is evaluated, so a join decides
+    admission and failure, never timing.
+    """
+
+    kind: JoinKind = "all"
+    quorum: int | None = None
+    fn: JoinAdmitFn | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in JOIN_KINDS:
+            raise ValueError(f"unsupported join kind: {self.kind!r}")
+        if self.kind == "quorum":
+            if isinstance(self.quorum, bool) or not isinstance(self.quorum, int) or self.quorum < 1:
+                raise ValueError("quorum join requires an integer quorum >= 1")
+        elif self.quorum is not None:
+            raise ValueError("only a quorum join may set quorum")
+        if self.kind == "custom" and not callable(self.fn):
+            raise ValueError("custom join requires a callable fn")
+        if self.kind != "custom" and self.fn is not None:
+            raise ValueError("only a custom join may set fn")
+
+
+@dataclass(frozen=True, slots=True)
+class FanOut:
+    """A diamond region: run ``branches`` concurrently, then continue at ``then``.
+
+    Branch order is canonical (ascending name), so authoring order never
+    affects results or ``graph_id``. Branch nodes must not declare their own
+    outgoing edge; a region ignores it.
+    """
+
+    branches: tuple[str, ...]
+    then: str
+    join: Join = field(default_factory=Join)
+
+    def __post_init__(self) -> None:
+        branches = tuple(self.branches)
+        if len(branches) < 2:
+            raise ValueError("FanOut requires at least two branches")
+        if len(set(branches)) != len(branches):
+            raise ValueError("FanOut branches must be unique")
+        if not all(isinstance(b, str) and b for b in branches):
+            raise ValueError("FanOut branch names must be non-empty strings")
+        if not isinstance(self.then, str) or not self.then:
+            raise ValueError("FanOut.then must be a node name or END")
+        if self.join.kind == "quorum" and self.join.quorum > len(branches):  # type: ignore[operator]
+            raise ValueError("quorum cannot exceed the number of branches")
+        object.__setattr__(self, "branches", tuple(sorted(branches)))
+
+
+Edge: TypeAlias = str | EdgeFn | ConditionalEdge | FanOut
 EventKind: TypeAlias = Literal[
-    "node.start", "node.end", "edge.selected", "interrupt", "done"
+    "node.start",
+    "node.end",
+    "edge.selected",
+    "interrupt",
+    "done",
+    "superstep.start",
+    "superstep.commit",
 ]
 TerminalReason: TypeAlias = Literal["done", "interrupted"]
 
@@ -70,6 +155,7 @@ class GraphEvent:
     target: str | None = None
     steps: int = 0
     terminal_reason: TerminalReason | None = None
+    branches: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +170,8 @@ class GraphObservation:
     event: GraphEvent
     state: PerpetuaState
     delta: NodeDelta | None = None
+    # ``superstep.commit`` only: state field -> branches that supplied it.
+    provenance: Mapping[str, tuple[str, ...]] | None = None
 
 
 class MaxStepsExceeded(RuntimeError):
@@ -106,15 +194,34 @@ def _describe_topology(
     nodes: Mapping[str, NodeFn],
     edges: Mapping[str, Edge],
     max_steps: int,
+    reducers: Mapping[str, Reducer] | None = None,
 ) -> GraphSpec:
     node_specs = tuple(
         NodeSpec(name=name, implementation_ref=stable_callable_ref(fn))
         for name, fn in nodes.items()
     )
     edge_specs: list[EdgeSpec] = []
+    join_specs: list[JoinSpec] = []
     for source, edge in edges.items():
         if isinstance(edge, str):
             edge_specs.append(EdgeSpec(source=source, kind="static", target=edge))
+        elif isinstance(edge, FanOut):
+            edge_specs.append(
+                EdgeSpec(
+                    source=source,
+                    kind="fanout",
+                    target=edge.then,
+                    declared_targets=edge.branches,
+                )
+            )
+            join_specs.append(
+                JoinSpec(
+                    source=source,
+                    kind=edge.join.kind,
+                    quorum=edge.join.quorum,
+                    ref=stable_callable_ref(edge.join.fn) if edge.join.fn else None,
+                )
+            )
         elif isinstance(edge, ConditionalEdge):
             edge_specs.append(
                 EdgeSpec(
@@ -132,11 +239,35 @@ def _describe_topology(
                     router_ref=stable_callable_ref(edge),
                 )
             )
+    reducer_specs = tuple(
+        ReducerSpec(
+            field=name,
+            kind=reducer.kind,
+            ref=stable_callable_ref(reducer.fn) if reducer.fn else None,
+        )
+        for name, reducer in (reducers or {}).items()
+    )
     return GraphSpec.create(
         max_steps=max_steps,
         nodes=node_specs,
         edges=tuple(edge_specs),
+        reducers=reducer_specs,
+        joins=tuple(join_specs),
     )
+
+
+@dataclass(slots=True)
+class _Settled:
+    name: str
+    delta: NodeDelta | None
+    error: Exception | None
+
+
+@dataclass(slots=True)
+class _RegionResult:
+    state: PerpetuaState
+    steps: int
+    interrupted: bool = False
 
 
 class CompiledGraph:
@@ -147,10 +278,12 @@ class CompiledGraph:
         nodes: dict[str, NodeFn],
         edges: dict[str, Edge],
         max_steps: int,
+        reducers: Mapping[str, Reducer] | None = None,
     ) -> None:
         self._nodes = dict(nodes)
         self._edges = dict(edges)
         self._max_steps = max_steps
+        self._reducers = dict(reducers or {})
 
     @property
     def nodes(self) -> Mapping[str, NodeFn]:
@@ -167,9 +300,16 @@ class CompiledGraph:
         """
         return MappingProxyType(self._edges)
 
+    @property
+    def reducers(self) -> Mapping[str, Reducer]:
+        """Read-only view of the declared per-field reducers."""
+        return MappingProxyType(self._reducers)
+
     def describe(self) -> GraphSpec:
         """Return an immutable structural description without executing code."""
-        return _describe_topology(self._nodes, self._edges, self._max_steps)
+        return _describe_topology(
+            self._nodes, self._edges, self._max_steps, self._reducers
+        )
 
     def validate(self):
         """Return the static GraphSpec validation report for this snapshot."""
@@ -257,7 +397,19 @@ class CompiledGraph:
                 delta=delta,
             )
 
-            node = self._resolve_edge(self._edges.get(current_node, END), state)
+            edge = self._edges.get(current_node, END)
+            if isinstance(edge, FanOut):
+                result = _RegionResult(state, steps)
+                async for observation in self._run_region(
+                    current_node, edge, state, steps, result
+                ):
+                    yield observation
+                if result.interrupted:
+                    return
+                state, steps = result.state, result.steps
+                node = self._resolve_edge(edge.then, state)
+            else:
+                node = self._resolve_edge(edge, state)
             yield GraphObservation(
                 GraphEvent(
                     "edge.selected",
@@ -273,6 +425,182 @@ class CompiledGraph:
             GraphEvent("done", steps=steps, terminal_reason="done"),
             state,
         )
+
+    async def _run_region(
+        self,
+        source: str,
+        edge: FanOut,
+        state: PerpetuaState,
+        steps: int,
+        result: _RegionResult,
+    ) -> AsyncIterator[GraphObservation]:
+        """Run one fan-out region inside the canonical scheduler loop.
+
+        All branches see one snapshot, all settle, and one atomic commit folds
+        the admitted deltas in ascending branch-name order. Nothing is
+        committed when an interrupt, a join refusal or a reducer conflict ends
+        the region.
+        """
+        branches = edge.branches
+        if steps + len(branches) > self._max_steps:
+            raise MaxStepsExceeded(steps=steps, last_node=source)
+        for name in branches:
+            self._node_for(name)
+        if edge.then != END and edge.then not in self._nodes:
+            raise ValueError(f"MiniGraph fan-out resolved to unknown node {edge.then!r}")
+
+        snapshot = state.merge({"nodes_visited": [*state.nodes_visited, *branches]})
+        yield GraphObservation(
+            GraphEvent(
+                "superstep.start",
+                node=source,
+                target=edge.then,
+                steps=steps,
+                branches=branches,
+            ),
+            snapshot,
+        )
+        for name in branches:
+            yield GraphObservation(GraphEvent("node.start", node=name, steps=steps), snapshot)
+
+        settled = await self._settle(branches, snapshot)
+
+        interrupted = [s for s in settled if s.error is not None and _is_interrupt(s.error)]
+        if interrupted:
+            first = interrupted[0]
+            assert first.error is not None
+            result.state = _interrupted_state(snapshot, first.name, first.error)
+            result.interrupted = True
+            yield GraphObservation(
+                GraphEvent(
+                    "interrupt",
+                    node=first.name,
+                    steps=steps,
+                    terminal_reason="interrupted",
+                    branches=branches,
+                ),
+                result.state,
+            )
+            return
+
+        admitted = self._admit(source, edge.join, settled)
+        merged, provenance = self._fold(snapshot, admitted)
+        committed = snapshot.merge(merged)
+        steps += sum(1 for s in settled if s.error is None)
+
+        for item in admitted:
+            yield GraphObservation(
+                GraphEvent("node.end", node=item.name, steps=steps),
+                committed,
+                delta=item.delta,
+            )
+        yield GraphObservation(
+            GraphEvent(
+                "superstep.commit",
+                node=source,
+                target=edge.then,
+                steps=steps,
+                branches=tuple(item.name for item in admitted),
+            ),
+            committed,
+            delta=merged,
+            provenance=provenance,
+        )
+        result.state = committed
+        result.steps = steps
+
+    async def _settle(
+        self, branches: tuple[str, ...], snapshot: PerpetuaState
+    ) -> list[_Settled]:
+        """Run every branch on one snapshot; return outcomes in branch order."""
+
+        async def call(name: str) -> _Settled:
+            try:
+                # Isolated copy: a branch mutating its input cannot leak into a
+                # sibling, the interrupted state or the committed state.
+                delta = self._nodes[name](snapshot.model_copy(deep=True))
+                if inspect.isawaitable(delta):
+                    delta = await delta
+            except Exception as exc:
+                return _Settled(name, None, exc)
+            if not isinstance(delta, dict):
+                return _Settled(
+                    name,
+                    None,
+                    TypeError(
+                        f"MiniGraph node {name!r} returned "
+                        f"{type(delta).__name__}; expected dict delta"
+                    ),
+                )
+            return _Settled(name, delta, None)
+
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(call(name)) for name in branches]
+        return [task.result() for task in tasks]
+
+    def _admit(
+        self, source: str, join: Join, settled: list[_Settled]
+    ) -> list[_Settled]:
+        """Apply the join; return admitted branches in canonical order."""
+        ok = [s for s in settled if s.error is None]
+        failed = [s for s in settled if s.error is not None]
+        kind = join.kind
+        if kind == "all":
+            admitted = ok if not failed else None
+        elif kind == "any":
+            admitted = ok if ok else None
+        elif kind == "first_success":
+            admitted = ok[:1] if ok else None
+        elif kind == "quorum":
+            assert join.quorum is not None
+            admitted = ok if len(ok) >= join.quorum else None
+        else:
+            assert join.fn is not None
+            outcomes = tuple(
+                BranchOutcome(s.name, s.error is None, type(s.error).__name__ if s.error else None)
+                for s in settled
+            )
+            names = list(join.fn(outcomes))
+            by_name = {s.name: s for s in settled}
+            for name in names:
+                if name not in by_name or by_name[name].error is not None:
+                    raise ValueError(
+                        f"custom join for {source!r} admitted {name!r}, "
+                        "which is not a successful branch"
+                    )
+            chosen = set(names)
+            admitted = [s for s in ok if s.name in chosen] or None
+        if admitted is None:
+            errors = [s.error for s in failed if s.error is not None]
+            if not errors:
+                errors = [ValueError(f"{kind} join admitted no branch")]
+            raise ExceptionGroup(
+                f"fan-out region {source!r} refused by {kind} join", errors
+            )
+        return admitted
+
+    def _fold(
+        self, snapshot: PerpetuaState, admitted: list[_Settled]
+    ) -> tuple[NodeDelta, dict[str, tuple[str, ...]]]:
+        """Fold admitted deltas, in branch order, into one delta plus provenance."""
+        contributions: dict[str, list[tuple[str, Any]]] = {}
+        for item in admitted:
+            assert item.delta is not None
+            for key, value in item.delta.items():
+                contributions.setdefault(key, []).append((item.name, value))
+        merged: NodeDelta = {}
+        provenance: dict[str, tuple[str, ...]] = {}
+        for key in sorted(contributions):
+            declared = self._reducers.get(key)
+            merged[key] = reduce_field(
+                key,
+                declared or DEFAULT_REDUCER,
+                getattr(snapshot, key, None),
+                contributions[key],
+                contribution_semantics=declared is not None,
+            )
+            provenance[key] = tuple(name for name, _ in contributions[key])
+        return merged, provenance
 
     def _node_for(self, name: str) -> NodeFn:
         try:
@@ -309,6 +637,7 @@ class MiniGraph:
     def __init__(self, *, max_steps: int = _DEFAULT_MAX_STEPS) -> None:
         self._nodes: dict[str, NodeFn] = {}
         self._edges: dict[str, Edge] = {}
+        self._reducers: dict[str, Reducer] = {}
         self._max_steps = max_steps
 
     def add_node(self, name: str, fn: NodeFn) -> "MiniGraph":
@@ -316,14 +645,29 @@ class MiniGraph:
         return self
 
     def add_edge(self, src: str, dst: Edge) -> "MiniGraph":
+        if isinstance(dst, FanOut) and src == START:
+            raise ValueError("a fan-out region needs a source node; START cannot fan out")
         self._edges[src] = dst
+        return self
+
+    def add_reducer(
+        self,
+        field_name: str,
+        kind: str | Reducer = "reject_conflict",
+        fn: Callable[[Any, tuple[Any, ...]], Any] | None = None,
+    ) -> "MiniGraph":
+        """Declare how branch writes to ``field_name`` fold in a fan-out region."""
+        reducer = kind if isinstance(kind, Reducer) else Reducer(kind, fn)  # type: ignore[arg-type]
+        self._reducers[field_name] = reducer
         return self
 
     def set_entry(self, node: str) -> "MiniGraph":
         return self.add_edge(START, node)
 
     def compile(self) -> CompiledGraph:
-        return CompiledGraph(self._nodes, self._edges, self._max_steps)
+        return CompiledGraph(
+            self._nodes, self._edges, self._max_steps, self._reducers
+        )
 
     def compile_validated(self) -> CompiledGraph:
         """Compile and fail closed if the detached GraphSpec is invalid."""
@@ -335,7 +679,9 @@ class MiniGraph:
 
     def describe(self) -> GraphSpec:
         """Return an immutable structural description without executing code."""
-        return _describe_topology(self._nodes, self._edges, self._max_steps)
+        return _describe_topology(
+            self._nodes, self._edges, self._max_steps, self._reducers
+        )
 
     def validate(self):
         """Return the static GraphSpec validation report for this builder."""

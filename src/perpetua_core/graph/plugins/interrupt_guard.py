@@ -1,6 +1,7 @@
 """resume_policy — apply MERGE or DROP semantics to interrupt resume values."""
 from __future__ import annotations
 from enum import Enum
+from typing import Any
 from perpetua_core.state import PerpetuaState
 
 
@@ -11,11 +12,17 @@ class ResumeMode(str, Enum):
 
 def resume_policy(
     state: PerpetuaState,
-    resume_value: dict,
+    resume_value: dict[str, Any],
     *,
     mode: ResumeMode,
     drop_key: str | None = None,
 ) -> PerpetuaState:
+    """Apply caller-supplied scratchpad values without restarting execution.
+
+    MERGE updates all supplied keys; DROP updates only ``drop_key`` and retains
+    other scratchpad keys. Neither mode resets interrupt status, verifies human
+    authority, loads a checkpoint cursor or deduplicates an external effect.
+    """
     if mode is ResumeMode.MERGE:
         return state.merge({"scratchpad": {**state.scratchpad, **resume_value}})
     if mode is ResumeMode.DROP:

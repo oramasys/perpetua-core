@@ -119,3 +119,17 @@ def test_advisory_targets_do_not_restrict_valid_routes(target: str) -> None:
     exported = asyncio.run(LangGraphExporter.to_langgraph(graph, PerpetuaState).ainvoke(make_state()))
     assert native.scratchpad == exported["scratchpad"]
     assert native.scratchpad == ({} if target == END else {"route": target})
+
+
+def test_fanout_region_is_refused_not_misexported() -> None:
+    from perpetua_core.graph.engine import FanOut
+
+    g = MiniGraph()
+    for name in ("plan", "a", "b", "after"):
+        g.add_node(name, lambda s: {})
+    g.set_entry("plan")
+    g.add_edge("plan", FanOut(("a", "b"), "after"))
+    g.add_edge("after", END)
+
+    with pytest.raises(NotImplementedError, match="fan-out region"):
+        LangGraphExporter.to_langgraph(g, PerpetuaState)
