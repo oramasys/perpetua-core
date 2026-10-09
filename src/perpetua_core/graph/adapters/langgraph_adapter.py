@@ -32,7 +32,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from perpetua_core.graph.engine import END, START, CompiledGraph, ConditionalEdge, MiniGraph
+from perpetua_core.graph.engine import (
+    END,
+    START,
+    CompiledGraph,
+    ConditionalEdge,
+    FanOut,
+    MiniGraph,
+)
 
 
 class LangGraphExporter:
@@ -67,6 +74,11 @@ class LangGraphExporter:
             if isinstance(edge, str):
                 lg_target = LG_END if edge == END else edge
                 builder.add_edge(lg_source, lg_target)
+            elif isinstance(edge, FanOut):
+                raise NotImplementedError(
+                    f"fan-out region at {source!r} cannot be exported to LangGraph yet: "
+                    "reducers and joins have no channel mapping. Run it natively."
+                )
             else:
                 # Conditional edge: `edge` is a Callable[[PerpetuaState], str]
                 # returning a MiniGraph target name (or END). LangGraph's
