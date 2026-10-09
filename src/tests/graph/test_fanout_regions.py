@@ -132,6 +132,23 @@ async def test_branches_share_one_snapshot() -> None:
     assert seen["a"][0] == ("plan", "a", "b")
 
 
+async def test_custom_reducer_failure_cannot_mutate_precommit_observations() -> None:
+    """A faulty fold must not rewrite already-emitted evidence of the snapshot."""
+    def corrupt(base: dict[str, Any], values: tuple[Any, ...]) -> Any:
+        base["leaked"] = True
+        raise ValueError("faulty fold")
+
+    graph = region({"a": branch({"a": 1}, "scratchpad"),
+                    "b": branch({"b": 2}, "scratchpad")},
+                   reducers={"scratchpad": Reducer("custom", corrupt)})
+    observations = []
+    with pytest.raises(ValueError, match="faulty fold"):
+        async for observation in graph.compile().aobserve(fresh()):
+            observations.append(observation)
+    assert not any("leaked" in observation.state.scratchpad for observation in observations)
+    assert not any(observation.event.kind == "superstep.commit" for observation in observations)
+
+
 async def test_event_sequence_and_provenance() -> None:
     observations = await observe(
         region(

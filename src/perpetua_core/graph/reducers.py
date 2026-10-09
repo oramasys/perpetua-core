@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any
 
 from perpetua_core.graph.spec import REDUCER_KINDS, ReducerKind
@@ -85,7 +86,9 @@ def reduce_field(
     if kind == "union":
         return _union(field, base, contributions)
     assert reducer.fn is not None
-    return reducer.fn(base, values)
+    # A contract-violating custom fold must not mutate the pre-commit snapshot
+    # or another field's contributions before raising or returning.
+    return reducer.fn(deepcopy(base), deepcopy(values))
 
 
 def _require_list(field: str, who: str, value: Any, kind: str) -> list[Any]:

@@ -238,3 +238,13 @@ def test_invalid_default_joins_are_kept_so_lint_can_report_them() -> None:
 
 def test_sole_default_join_on_a_fanout_source_is_still_dropped() -> None:
     assert region_spec(joins=(JoinSpec("plan", "all"),)).graph_id == region_spec(joins=()).graph_id
+
+
+@pytest.mark.parametrize("record", ["graph", "nodes", "edges", "reducers", "joins"])
+def test_loaded_spec_rejects_unhashed_unknown_fields(record: str) -> None:
+    """A description must not silently discard semantics outside its content hash."""
+    payload = region_spec().to_dict()
+    target = payload if record == "graph" else payload[record][0]
+    target["unrecognized_semantics"] = True
+    with pytest.raises(ValueError, match="unknown.*field"):
+        GraphSpec.from_dict(payload)

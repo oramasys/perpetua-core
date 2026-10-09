@@ -252,6 +252,15 @@ def compute_graph_id(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _check_record_fields(payload: Mapping[str, Any], allowed: set[str], record: str) -> None:
+    """Reject unhashed semantics; annotations belong inside the metadata object."""
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"GraphSpec {record} must be an object")
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError(f"GraphSpec {record} has unknown fields: {sorted(unknown, key=str)!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class GraphSpec:
     schema_version: str
@@ -380,6 +389,16 @@ class GraphSpec:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "GraphSpec":
+        """Load a description with exact known fields and verified content identity.
+
+        No callable is imported or invoked. This does not admit an executable
+        artifact or restore a scheduler cursor; callers still rebuild trusted
+        callables, validate structure and apply the application admission gates.
+        """
+        _check_record_fields(payload, {
+            "schema_version", "graph_id", "max_steps", "nodes", "edges", "metadata",
+            "reducers", "joins",
+        }, "graph")
         schema_version = str(payload.get("schema_version", ""))
         if schema_version not in SUPPORTED_GRAPH_SPEC_SCHEMA_VERSIONS:
             raise ValueError(
@@ -390,6 +409,13 @@ class GraphSpec:
         raw_edges = payload.get("edges", [])
         if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
             raise TypeError("GraphSpec nodes and edges must be lists")
+
+        for item in raw_nodes:
+            _check_record_fields(item, {"name", "implementation_ref", "metadata"}, "node")
+        for item in raw_edges:
+            _check_record_fields(item, {
+                "source", "kind", "target", "router_ref", "declared_targets", "metadata",
+            }, "edge")
 
         nodes = tuple(
             NodeSpec(
@@ -414,6 +440,10 @@ class GraphSpec:
         raw_joins = payload.get("joins", [])
         if not isinstance(raw_reducers, list) or not isinstance(raw_joins, list):
             raise TypeError("GraphSpec reducers and joins must be lists")
+        for item in raw_reducers:
+            _check_record_fields(item, {"field", "kind", "ref"}, "reducer")
+        for item in raw_joins:
+            _check_record_fields(item, {"source", "kind", "quorum", "ref"}, "join")
         reducers = tuple(
             ReducerSpec(
                 field=str(item["field"]),

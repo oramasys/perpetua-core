@@ -7,9 +7,11 @@ application composition.
 
 Cross-repository authority is intentionally split:
 
-- `oramasys/perpetua-core` owns universal execution mechanics;
-- `diazMelgarejo/orama-system` owns GraphSpec, evaluation, workflow, and
-  effect-policy semantics above the kernel;
+- `oramasys/perpetua-core` owns structural GraphSpec/NodeSpec/EdgeSpec,
+  graph identity and universal execution mechanics;
+- `oramasys/oramasys` owns application graphs and restrict-only graph policy;
+- `diazMelgarejo/orama-system` records normative decisions, evaluation and
+  workflow methodology; it does not own a second runtime GraphSpec;
 - `oramasys/agate` owns cold-local-metal hardware capability, affinity, fit,
   placement, and readiness policy;
 - provider/runtime adapters own provider health, loaded-model state, and
@@ -18,6 +20,17 @@ Cross-repository authority is intentionally split:
 The repository still contains hardware/discovery helpers inherited from earlier
 salvage work. Their presence does not make this package the cross-repository
 hardware-policy authority.
+
+R3 adds bounded single-level regions, not full LangGraph/LangChain replacement.
+The export adapter explicitly refuses fan-out regions; dynamic Send, nested
+regions and durable replay remain deferred. The LangChain adapter is protocol
+shaped, with buffered synchronous streaming and partial config support, not a
+drop-in implementation of every upstream Runnable API. Pydantic AI integration
+belongs in Oramasys and remains an explicitly gated offline bridge.
+
+`SqliteCheckpointer.load_latest()` reads state only. `resume_policy()` changes
+scratchpad values only. Calling `ainvoke()` on that state starts at START again;
+none of these functions provides an authorized or idempotent effect replay.
 
 ## Current MiniGraph contract
 
