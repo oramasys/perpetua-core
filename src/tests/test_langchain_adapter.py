@@ -223,6 +223,7 @@ def test_abatch_rejects_invalid_concurrency_before_running_nodes(
     calls: list[str] = []
 
     def node(state: PerpetuaState) -> dict[str, object]:
+        """Record any graph effect so rejected bounds cannot execute work."""
         calls.append(state.session_id)
         return {}
 
@@ -231,6 +232,7 @@ def test_abatch_rejects_invalid_concurrency_before_running_nodes(
     adapter = LangChainRunnableAdapter(graph)
 
     async def run() -> None:
+        """Exercise fail-fast validation under a bounded test deadline."""
         with pytest.raises(ValueError, match="max_concurrency must be a positive integer"):
             await asyncio.wait_for(
                 adapter.abatch([] if empty else [make_state()], {"max_concurrency": limit}),
@@ -244,7 +246,19 @@ def test_abatch_rejects_invalid_concurrency_before_running_nodes(
 @pytest.mark.parametrize("limit", [None, 1, 2, 100])
 def test_abatch_valid_bounds_preserve_input_order(limit: int | None) -> None:
     """Positive limits and None retain graph behavior and input ordering."""
-    adapter = LangChainRunnableAdapter(_linear_graph())
+    class SlowFirstAdapter(LangChainRunnableAdapter):
+        """Make completion order disagree with input order for concurrent runs."""
+
+        async def ainvoke(
+            self, input_data: PerpetuaState | dict[str, object],
+            config: dict[str, object] | None = None,
+        ) -> PerpetuaState:
+            """Delay the first item so an as_completed mutant is detectable."""
+            state = input_data if isinstance(input_data, PerpetuaState) else PerpetuaState(**input_data)
+            await asyncio.sleep(0.03 if state.session_id == "first" else 0)
+            return await super().ainvoke(state, config=config)
+
+    adapter = SlowFirstAdapter(_linear_graph())
     results = asyncio.run(adapter.abatch(
         [make_state(session_id="first"), make_state(session_id="second")],
         {"max_concurrency": limit},
