@@ -13,8 +13,21 @@ from types import MappingProxyType
 from typing import Any, Literal, Mapping, TypeAlias
 
 GRAPH_SPEC_SCHEMA_VERSION = "1"
-SUPPORTED_GRAPH_SPEC_SCHEMA_VERSIONS = frozenset({GRAPH_SPEC_SCHEMA_VERSION})
-EdgeKind = Literal["static", "conditional"]
+# Schema "2" is used only by specs that declare fan-out regions, reducers or
+# joins. Specs that use none of them stay schema "1" with an unchanged graph_id.
+GRAPH_SPEC_SCHEMA_VERSION_R3 = "2"
+SUPPORTED_GRAPH_SPEC_SCHEMA_VERSIONS = frozenset(
+    {GRAPH_SPEC_SCHEMA_VERSION, GRAPH_SPEC_SCHEMA_VERSION_R3}
+)
+EdgeKind = Literal["static", "conditional", "fanout"]
+ReducerKind = Literal[
+    "reject_conflict", "first", "last", "concat", "union", "custom"
+]
+JoinKind = Literal["all", "any", "first_success", "quorum", "custom"]
+REDUCER_KINDS: tuple[str, ...] = (
+    "reject_conflict", "first", "last", "concat", "union", "custom",
+)
+JOIN_KINDS: tuple[str, ...] = ("all", "any", "first_success", "quorum", "custom")
 JSONScalar: TypeAlias = None | bool | int | float | str
 FrozenJSON: TypeAlias = JSONScalar | tuple["FrozenJSON", ...] | Mapping[str, "FrozenJSON"]
 
@@ -100,6 +113,17 @@ class EdgeSpec:
         elif self.kind == "conditional":
             if self.target is not None:
                 raise ValueError("conditional edge must not set target")
+        elif self.kind == "fanout":
+            # target is the node (or END) that runs after the region commits;
+            # declared_targets are the branches and are authoritative here.
+            if self.target is None:
+                raise ValueError("fanout edge requires target")
+            if self.router_ref is not None:
+                raise ValueError("fanout edge must not set router_ref")
+            if len(set(self.declared_targets)) != len(self.declared_targets):
+                raise ValueError("fanout edge branches must be unique")
+            if len(self.declared_targets) < 2:
+                raise ValueError("fanout edge requires at least two branches")
         else:
             raise ValueError(f"unsupported edge kind: {self.kind!r}")
         object.__setattr__(
@@ -117,6 +141,60 @@ class EdgeSpec:
             "router_ref": self.router_ref,
             "declared_targets": list(self.declared_targets),
             "metadata": _thaw_json(self.metadata),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ReducerSpec:
+    """How concurrent branch writes to one state field are folded."""
+
+    field: str
+    kind: ReducerKind
+    ref: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.field, str) or not self.field:
+            raise ValueError("reducer field must be a non-empty string")
+        if self.kind not in REDUCER_KINDS:
+            raise ValueError(f"unsupported reducer kind: {self.kind!r}")
+        if self.kind != "custom" and self.ref is not None:
+            raise ValueError("only a custom reducer may set ref")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"field": self.field, "kind": self.kind, "ref": self.ref}
+
+
+@dataclass(frozen=True, slots=True)
+class JoinSpec:
+    """Which settled branches of one fan-out region are admitted."""
+
+    source: str
+    kind: JoinKind = "all"
+    quorum: int | None = None
+    ref: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in JOIN_KINDS:
+            raise ValueError(f"unsupported join kind: {self.kind!r}")
+        if self.kind == "quorum":
+            if isinstance(self.quorum, bool) or not isinstance(self.quorum, int) or self.quorum < 1:
+                raise ValueError("quorum join requires an integer quorum >= 1")
+        elif self.quorum is not None:
+            raise ValueError("only a quorum join may set quorum")
+        if self.kind != "custom" and self.ref is not None:
+            raise ValueError("only a custom join may set ref")
+
+    @property
+    def is_default(self) -> bool:
+        """``all`` with no parameters is the implied join of every region."""
+        return self.kind == "all"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "kind": self.kind,
+            "quorum": self.quorum,
+            "ref": self.ref,
         }
 
 
@@ -142,14 +220,23 @@ def canonical_graph_payload(
     nodes: tuple[NodeSpec, ...],
     edges: tuple[EdgeSpec, ...],
     metadata: Mapping[str, FrozenJSON],
+    reducers: tuple[ReducerSpec, ...] = (),
+    joins: tuple[JoinSpec, ...] = (),
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "schema_version": schema_version,
         "max_steps": max_steps,
         "nodes": [node.to_dict() for node in sorted(nodes, key=_node_sort_key)],
         "edges": [edge.to_dict() for edge in sorted(edges, key=_edge_sort_key)],
         "metadata": _thaw_json(metadata),
     }
+    # The schema "1" payload is byte-identical to releases before R3.
+    if schema_version != GRAPH_SPEC_SCHEMA_VERSION:
+        payload["reducers"] = [
+            r.to_dict() for r in sorted(reducers, key=lambda r: r.field)
+        ]
+        payload["joins"] = [j.to_dict() for j in sorted(joins, key=lambda j: j.source)]
+    return payload
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> str:
@@ -175,11 +262,19 @@ class GraphSpec:
     metadata: Mapping[str, FrozenJSON] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    reducers: tuple[ReducerSpec, ...] = ()
+    joins: tuple[JoinSpec, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(sorted(self.nodes, key=_node_sort_key)))
         object.__setattr__(self, "edges", tuple(sorted(self.edges, key=_edge_sort_key)))
         object.__setattr__(self, "metadata", _freeze_json(dict(self.metadata)))
+        object.__setattr__(
+            self, "reducers", tuple(sorted(self.reducers, key=lambda r: r.field))
+        )
+        object.__setattr__(
+            self, "joins", tuple(sorted(self.joins, key=lambda j: j.source))
+        )
 
     @classmethod
     def create(
@@ -189,19 +284,50 @@ class GraphSpec:
         nodes: tuple[NodeSpec, ...] = (),
         edges: tuple[EdgeSpec, ...] = (),
         metadata: Mapping[str, Any] | None = None,
-        schema_version: str = GRAPH_SPEC_SCHEMA_VERSION,
+        schema_version: str | None = None,
+        reducers: tuple[ReducerSpec, ...] = (),
+        joins: tuple[JoinSpec, ...] = (),
     ) -> "GraphSpec":
+        """Build a spec; the schema version follows from the features used.
+
+        Fan-out edges, reducers and joins require schema "2". A spec that uses
+        none of them is schema "1", so its ``graph_id`` is unchanged. The
+        implied default join (``all``) is dropped so one meaning has one hash.
+        """
         frozen_metadata = _freeze_json(dict(metadata or {}))
         if not isinstance(frozen_metadata, Mapping):
             raise TypeError("GraphSpec metadata must be a mapping")
         canonical_nodes = tuple(sorted(nodes, key=_node_sort_key))
         canonical_edges = tuple(sorted(edges, key=_edge_sort_key))
+        canonical_reducers = tuple(sorted(reducers, key=lambda r: r.field))
+        canonical_joins = tuple(
+            sorted((j for j in joins if not j.is_default), key=lambda j: j.source)
+        )
+        uses_r3 = bool(
+            canonical_reducers
+            or canonical_joins
+            or any(edge.kind == "fanout" for edge in canonical_edges)
+        )
+        if schema_version is None:
+            schema_version = (
+                GRAPH_SPEC_SCHEMA_VERSION_R3 if uses_r3 else GRAPH_SPEC_SCHEMA_VERSION
+            )
+        elif schema_version == GRAPH_SPEC_SCHEMA_VERSION and uses_r3:
+            raise ValueError(
+                "fan-out edges, reducers and joins require GraphSpec schema version '2'"
+            )
+        elif schema_version == GRAPH_SPEC_SCHEMA_VERSION_R3 and not uses_r3:
+            raise ValueError(
+                "GraphSpec schema version '2' requires a fan-out edge, reducer or join"
+            )
         payload = canonical_graph_payload(
             schema_version=schema_version,
             max_steps=max_steps,
             nodes=canonical_nodes,
             edges=canonical_edges,
             metadata=frozen_metadata,
+            reducers=canonical_reducers,
+            joins=canonical_joins,
         )
         return cls(
             schema_version=schema_version,
@@ -210,6 +336,8 @@ class GraphSpec:
             nodes=canonical_nodes,
             edges=canonical_edges,
             metadata=frozen_metadata,
+            reducers=canonical_reducers,
+            joins=canonical_joins,
         )
 
     def canonical_payload(self) -> dict[str, Any]:
@@ -219,6 +347,8 @@ class GraphSpec:
             nodes=self.nodes,
             edges=self.edges,
             metadata=self.metadata,
+            reducers=self.reducers,
+            joins=self.joins,
         )
 
     def canonical_json(self) -> str:
@@ -262,12 +392,35 @@ class GraphSpec:
             )
             for item in raw_edges
         )
+        raw_reducers = payload.get("reducers", [])
+        raw_joins = payload.get("joins", [])
+        if not isinstance(raw_reducers, list) or not isinstance(raw_joins, list):
+            raise TypeError("GraphSpec reducers and joins must be lists")
+        reducers = tuple(
+            ReducerSpec(
+                field=str(item["field"]),
+                kind=item["kind"],
+                ref=item.get("ref"),
+            )
+            for item in raw_reducers
+        )
+        joins = tuple(
+            JoinSpec(
+                source=str(item["source"]),
+                kind=item["kind"],
+                quorum=item.get("quorum"),
+                ref=item.get("ref"),
+            )
+            for item in raw_joins
+        )
         spec = cls.create(
             schema_version=schema_version,
             max_steps=int(payload["max_steps"]),
             nodes=nodes,
             edges=edges,
             metadata=payload.get("metadata", {}),
+            reducers=reducers,
+            joins=joins,
         )
         supplied_graph_id = payload.get("graph_id")
         if not isinstance(supplied_graph_id, str):
