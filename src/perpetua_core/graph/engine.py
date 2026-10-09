@@ -516,7 +516,9 @@ class CompiledGraph:
 
         async def call(name: str) -> _Settled:
             try:
-                delta = self._nodes[name](snapshot)
+                # Isolated copy: a branch mutating its input cannot leak into a
+                # sibling, the interrupted state or the committed state.
+                delta = self._nodes[name](snapshot.model_copy(deep=True))
                 if inspect.isawaitable(delta):
                     delta = await delta
             except Exception as exc:
@@ -567,9 +569,11 @@ class CompiledGraph:
                         "which is not a successful branch"
                     )
             chosen = set(names)
-            admitted = [s for s in ok if s.name in chosen]
+            admitted = [s for s in ok if s.name in chosen] or None
         if admitted is None:
             errors = [s.error for s in failed if s.error is not None]
+            if not errors:
+                errors = [ValueError(f"{kind} join admitted no branch")]
             raise ExceptionGroup(
                 f"fan-out region {source!r} refused by {kind} join", errors
             )

@@ -359,6 +359,37 @@ async def test_custom_join_cannot_admit_a_failed_branch() -> None:
         await observe(graph)
 
 
+async def test_custom_join_admitting_nothing_refuses_the_region() -> None:
+    graph = region(
+        {"a": branch([m("A")]), "b": branch([m("B")])},
+        join=Join("custom", fn=lambda outcomes: []),
+        reducers={"messages": Reducer("concat")},
+    )
+    with pytest.raises(ExceptionGroup) as caught:
+        await observe(graph)
+    assert "admitted no branch" in str(caught.value.exceptions[0])
+
+
+async def test_branch_mutating_its_input_cannot_leak() -> None:
+    async def mutator(state: PerpetuaState) -> dict:
+        state.scratchpad["leak"] = True
+        state.messages.append(m("LEAK"))
+        return {"retry_count": 1}
+
+    seen: list = []
+
+    async def reader(state: PerpetuaState) -> dict:
+        await asyncio.sleep(0.01)
+        seen.append((dict(state.scratchpad), list(state.messages)))
+        return {"retry_count": 1}
+
+    graph = region({"a": mutator, "b": reader})
+    final = (await observe(graph))[-1].state
+    assert seen == [({}, [])]
+    assert "leak" not in final.scratchpad
+    assert final.messages == []
+
+
 async def test_custom_join_sees_outcomes_without_deltas() -> None:
     seen: list = []
 
