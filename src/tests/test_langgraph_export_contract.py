@@ -46,14 +46,14 @@ def test_declared_targets_and_router_survive_export(monkeypatch: pytest.MonkeyPa
     monkeypatch.setitem(sys.modules, "langgraph.graph", module)
     graph = MiniGraph().add_node("a", lambda state: {}).add_node("b", lambda state: {})
     graph.add_edge(START, "a")
-    graph.add_edge("a", ConditionalEdge(lambda state: END if state.metadata.get("done") else "b", ("b", END)))
+    graph.add_edge("a", ConditionalEdge(lambda state: END if state.metadata.get("done") else "b", ("b",)))
     graph.add_edge("b", END)
     assert isinstance(LangGraphExporter.to_langgraph(graph, PerpetuaState), Builder)
     assert calls["nodes"] == ["a", "b"]
     assert calls["edges"] == [("lg_start", "a"), ("b", "lg_end")]
     source, router, paths = calls["conditional"][0]
     assert source == "a"
-    assert paths == {"b": "b", "lg_end": "lg_end"}
+    assert paths == {"a": "a", "b": "b", "lg_end": "lg_end"}
     assert router(PerpetuaState(session_id="x")) == "b"
     assert router(PerpetuaState(session_id="x", metadata={"done": True})) == "lg_end"
 

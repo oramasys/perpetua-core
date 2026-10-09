@@ -81,9 +81,11 @@ class LangGraphExporter:
                     return LG_END if target == END else target
 
                 if isinstance(edge, ConditionalEdge) and edge.declared_targets:
+                    # Declarations are advisory, not an exhaustive runtime allowlist.
+                    # Cover every valid native destination, including undeclared END.
                     path_map = {
                         LG_END if target == END else target: LG_END if target == END else target
-                        for target in edge.declared_targets
+                        for target in (*compiled.nodes, END)
                     }
                     builder.add_conditional_edges(lg_source, _route, path_map)
                 else:
