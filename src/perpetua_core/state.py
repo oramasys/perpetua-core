@@ -14,7 +14,7 @@ class PerpetuaState(BaseModel):
     session_id: str
     messages: list[dict[str, Any]] = Field(default_factory=list)
     scratchpad: dict[str, Any] = Field(default_factory=dict)
-    status: Literal["idle", "running", "interrupted", "error", "done"] = "idle"
+    status: Literal["idle", "running", "interrupted", "stopped", "error", "done"] = "idle"
     error: str | None = None
     nodes_visited: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
