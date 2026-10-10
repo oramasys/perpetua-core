@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import re
 
 import pytest
 
@@ -77,6 +78,10 @@ def test_graph_id_is_stable_across_input_order() -> None:
 
     assert a.graph_id == b.graph_id
     assert a.to_dict() == b.to_dict()
+
+
+def test_graph_id_is_stable_bare_sha256_hex() -> None:
+    assert re.fullmatch(r"[0-9a-f]{64}", _basic_spec().graph_id)
 
 
 def test_graph_id_is_stable_when_equal_topology_records_differ_in_metadata() -> None:
