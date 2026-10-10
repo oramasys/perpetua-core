@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
+from perpetua_core.graph.gate import (
+    CommitRequest,
+    DispatchGate,
+    DispatchRequest,
+    GateDecision,
+    GateRefused,
+    checked,
+)
 from perpetua_core.graph.reducers import DEFAULT_REDUCER, Reducer, reduce_field
 from perpetua_core.graph.spec import (
     JOIN_KINDS,
@@ -55,6 +63,7 @@ class ConditionalEdge:
     declared_targets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         object.__setattr__(
             self,
             "declared_targets",
@@ -87,6 +96,7 @@ class Join:
     fn: JoinAdmitFn | None = None
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         if self.kind not in JOIN_KINDS:
             raise ValueError(f"unsupported join kind: {self.kind!r}")
         if self.kind == "quorum":
@@ -114,6 +124,7 @@ class FanOut:
     join: Join = field(default_factory=Join)
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         branches = tuple(self.branches)
         if len(branches) < 2:
             raise ValueError("FanOut requires at least two branches")
@@ -137,8 +148,9 @@ EventKind: TypeAlias = Literal[
     "done",
     "superstep.start",
     "superstep.commit",
+    "stopped",
 ]
-TerminalReason: TypeAlias = Literal["done", "interrupted"]
+TerminalReason: TypeAlias = Literal["done", "interrupted", "stopped"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +194,7 @@ class MaxStepsExceeded(RuntimeError):
     """
 
     def __init__(self, steps: int, last_node: str) -> None:
+        """Record the step count and the node that exceeded the bound."""
         self.steps = steps
         self.last_node = last_node
         super().__init__(
@@ -196,6 +209,7 @@ def _describe_topology(
     max_steps: int,
     reducers: Mapping[str, Reducer] | None = None,
 ) -> GraphSpec:
+    """Return a deterministic description of nodes, edges and entry for identity."""
     node_specs = tuple(
         NodeSpec(name=name, implementation_ref=stable_callable_ref(fn))
         for name, fn in nodes.items()
@@ -258,6 +272,7 @@ def _describe_topology(
 
 @dataclass(slots=True)
 class _Settled:
+    """Outcome of one settled fan-out branch: its delta or its error."""
     name: str
     delta: NodeDelta | None
     error: Exception | None
@@ -265,9 +280,11 @@ class _Settled:
 
 @dataclass(slots=True)
 class _RegionResult:
+    """Outcome of a settled fan-out region: admitted deltas and steps."""
     state: PerpetuaState
     steps: int
     interrupted: bool = False
+    stopped: bool = False
 
 
 class CompiledGraph:
@@ -280,6 +297,7 @@ class CompiledGraph:
         max_steps: int,
         reducers: Mapping[str, Reducer] | None = None,
     ) -> None:
+        """Initialise the instance and validate its arguments."""
         self._nodes = dict(nodes)
         self._edges = dict(edges)
         self._max_steps = max_steps
@@ -317,31 +335,48 @@ class CompiledGraph:
 
         return lint_graph_spec(self.describe())
 
-    async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
-        """Run the graph to normal completion or structural interruption."""
+    async def ainvoke(
+        self, state: PerpetuaState, *, gate: DispatchGate | None = None
+    ) -> PerpetuaState:
+        """Run the graph to completion, structural interruption or a gate stop.
+
+        ``gate`` guards every execution boundary for this invocation only; see
+        :mod:`perpetua_core.graph.gate`. ``None`` keeps pre-T1 behaviour.
+        """
         final_state = state
-        async for observation in self.aobserve(state):
+        async for observation in self.aobserve(state, gate=gate):
             final_state = observation.state
         return final_state
 
     async def aobserve(
         self,
         state: PerpetuaState,
+        *,
+        gate: DispatchGate | None = None,
     ) -> AsyncIterator[GraphObservation]:
         """Yield rich in-process observations from the canonical scheduler."""
-        async for observation in self._run(state):
+        async for observation in self._run(state, gate):
             yield observation
 
-    async def asteps(self, state: PerpetuaState) -> AsyncIterator[GraphEvent]:
+    async def asteps(
+        self, state: PerpetuaState, *, gate: DispatchGate | None = None
+    ) -> AsyncIterator[GraphEvent]:
         """Yield sanitized structural events from the canonical scheduler."""
-        async for observation in self.aobserve(state):
+        async for observation in self.aobserve(state, gate=gate):
             yield observation.event
 
-    async def _run(self, state: PerpetuaState) -> AsyncIterator[GraphObservation]:
+    async def _run(
+        self, state: PerpetuaState, gate: DispatchGate | None = None
+    ) -> AsyncIterator[GraphObservation]:
         """Sole graph scheduler; all execution views project from this loop."""
-        node = self._resolve_edge(self._edges.get(START, END), state)
         steps = 0
         last_node = START
+        start_edge = self._edges.get(START, END)
+        decision = await self._dispatch(gate, start_edge, "router", (START,), steps, START)
+        if decision is not None:
+            yield _stopped(state, START, steps, decision)
+            return
+        node = self._resolve_edge(start_edge, state)
 
         yield GraphObservation(
             GraphEvent("edge.selected", node=START, target=node, steps=steps),
@@ -364,6 +399,12 @@ class CompiledGraph:
                 state,
             )
 
+            # Ask the gate immediately before the call: a consumer may have changed
+            # stop or authority state while this generator was paused on the yield.
+            decision = await self._dispatch(gate, None, "node", (current_node,), steps)
+            if decision is not None:
+                yield _stopped(state, current_node, steps, decision)
+                return
             try:
                 delta = node_fn(state)
                 if inspect.isawaitable(delta):
@@ -389,6 +430,11 @@ class CompiledGraph:
                     f"{type(delta).__name__}; expected dict delta"
                 )
 
+            decision = await self._commit(gate, "node", (current_node,), steps)
+            if decision is not None:
+                yield _stopped(state, current_node, steps, decision)
+                return
+            # Publish synchronously after the commit decision: no await in between.
             state = state.merge(delta)
             steps += 1
             yield GraphObservation(
@@ -401,15 +447,18 @@ class CompiledGraph:
             if isinstance(edge, FanOut):
                 result = _RegionResult(state, steps)
                 async for observation in self._run_region(
-                    current_node, edge, state, steps, result
+                    current_node, edge, state, steps, result, gate
                 ):
                     yield observation
-                if result.interrupted:
+                if result.interrupted or result.stopped:
                     return
                 state, steps = result.state, result.steps
-                node = self._resolve_edge(edge.then, state)
-            else:
-                node = self._resolve_edge(edge, state)
+                edge = edge.then
+            decision = await self._dispatch(gate, edge, "router", (current_node,), steps, current_node)
+            if decision is not None:
+                yield _stopped(state, current_node, steps, decision)
+                return
+            node = self._resolve_edge(edge, state)
             yield GraphObservation(
                 GraphEvent(
                     "edge.selected",
@@ -426,6 +475,43 @@ class CompiledGraph:
             state,
         )
 
+    async def _dispatch(
+        self,
+        gate: DispatchGate | None,
+        edge: Edge | None,
+        boundary: str,
+        nodes: tuple[str, ...],
+        steps: int,
+        source: str | None = None,
+    ) -> GateDecision | None:
+        """Ask the gate before a boundary runs. Returns a stop decision, else None.
+
+        Routers are only guarded when executable (a callable edge); a static
+        target runs no code. A refusal raises :class:`GateRefused`.
+        """
+        if gate is None:
+            return None
+        if boundary == "router" and not (isinstance(edge, ConditionalEdge) or callable(edge)):
+            return None
+        request = DispatchRequest(boundary, nodes, steps, source)  # type: ignore[arg-type]
+        decision = checked(await gate.before_dispatch(request))
+        return _enforce(decision, request)
+
+    async def _commit(
+        self,
+        gate: DispatchGate | None,
+        boundary: str,
+        nodes: tuple[str, ...],
+        steps: int,
+        source: str | None = None,
+    ) -> GateDecision | None:
+        """Test helper: commit."""
+        if gate is None:
+            return None
+        request = CommitRequest(boundary, nodes, steps, source)  # type: ignore[arg-type]
+        decision = checked(await gate.before_commit(request))
+        return _enforce(decision, request)
+
     async def _run_region(
         self,
         source: str,
@@ -433,13 +519,15 @@ class CompiledGraph:
         state: PerpetuaState,
         steps: int,
         result: _RegionResult,
+        gate: DispatchGate | None = None,
     ) -> AsyncIterator[GraphObservation]:
         """Run one fan-out region inside the canonical scheduler loop.
 
         All branches see one snapshot, all settle, and one atomic commit folds
         the admitted deltas in ascending branch-name order. Nothing is
-        committed when an interrupt, a join refusal or a reducer conflict ends
-        the region.
+        committed when an interrupt, a join refusal, a reducer conflict or a
+        gate refusal or stop ends the region. The gate sees the whole branch
+        batch once, so a refusal starts no branch.
         """
         branches = edge.branches
         if steps + len(branches) > self._max_steps:
@@ -463,7 +551,17 @@ class CompiledGraph:
         for name in branches:
             yield GraphObservation(GraphEvent("node.start", node=name, steps=steps), snapshot)
 
+        # One decision for the whole batch, taken after the last yield and
+        # immediately before any branch starts: a refusal or stop starts none.
+        decision = await self._dispatch(gate, None, "fanout", branches, steps, source)
+        if decision is not None:
+            stopped = _stopped(state, source, steps, decision)
+            result.stopped, result.state = True, stopped.state
+            yield stopped
+            return
         settled = await self._settle(branches, snapshot)
+        # Completed node executions now include every branch that settled ok.
+        completed = steps + sum(1 for s in settled if s.error is None)
 
         interrupted = [s for s in settled if s.error is not None and _is_interrupt(s.error)]
         if interrupted:
@@ -483,10 +581,31 @@ class CompiledGraph:
             )
             return
 
+        if edge.join.kind == "custom":
+            decision = await self._dispatch(gate, None, "join", branches, completed, source)
+            if decision is not None:
+                stopped = _stopped(state, source, steps, decision)
+                result.stopped, result.state = True, stopped.state
+                yield stopped
+                return
         admitted = self._admit(source, edge.join, settled)
+        admitted_names = tuple(item.name for item in admitted)
+        decision = await self._dispatch(gate, None, "reducer", admitted_names, completed, source)
+        if decision is not None:
+            stopped = _stopped(state, source, steps, decision)
+            result.stopped, result.state = True, stopped.state
+            yield stopped
+            return
         merged, provenance = self._fold(snapshot, admitted)
+        decision = await self._commit(gate, "region", admitted_names, completed, source)
+        if decision is not None:
+            stopped = _stopped(state, source, steps, decision)
+            result.stopped, result.state = True, stopped.state
+            yield stopped
+            return
+        # Publish synchronously after the commit decision: no await in between.
         committed = snapshot.merge(merged)
-        steps += sum(1 for s in settled if s.error is None)
+        steps = completed
 
         for item in admitted:
             yield GraphObservation(
@@ -500,7 +619,7 @@ class CompiledGraph:
                 node=source,
                 target=edge.then,
                 steps=steps,
-                branches=tuple(item.name for item in admitted),
+                branches=admitted_names,
             ),
             committed,
             delta=merged,
@@ -515,6 +634,7 @@ class CompiledGraph:
         """Run every branch on one snapshot; return outcomes in branch order."""
 
         async def call(name: str) -> _Settled:
+            """Run one branch node and capture its outcome without raising."""
             try:
                 # Isolated copy: a branch mutating its input cannot leak into a
                 # sibling, the interrupted state or the committed state.
@@ -603,6 +723,7 @@ class CompiledGraph:
         return merged, provenance
 
     def _node_for(self, name: str) -> NodeFn:
+        """Test helper: node for."""
         try:
             return self._nodes[name]
         except KeyError:
@@ -611,6 +732,7 @@ class CompiledGraph:
             ) from None
 
     def _resolve_edge(self, edge: Edge, state: PerpetuaState) -> str:
+        """Test helper: resolve edge."""
         if isinstance(edge, ConditionalEdge):
             target = edge.router(state)
         elif callable(edge):
@@ -635,16 +757,19 @@ class MiniGraph:
     """Mutable graph builder; ``compile()`` creates a detached runtime snapshot."""
 
     def __init__(self, *, max_steps: int = _DEFAULT_MAX_STEPS) -> None:
+        """Initialise the instance and validate its arguments."""
         self._nodes: dict[str, NodeFn] = {}
         self._edges: dict[str, Edge] = {}
         self._reducers: dict[str, Reducer] = {}
         self._max_steps = max_steps
 
     def add_node(self, name: str, fn: NodeFn) -> "MiniGraph":
+        """Test helper: add node."""
         self._nodes[name] = fn
         return self
 
     def add_edge(self, src: str, dst: Edge) -> "MiniGraph":
+        """Test helper: add edge."""
         if isinstance(dst, FanOut) and src == START:
             raise ValueError("a fan-out region needs a source node; START cannot fan out")
         self._edges[src] = dst
@@ -662,9 +787,11 @@ class MiniGraph:
         return self
 
     def set_entry(self, node: str) -> "MiniGraph":
+        """Test helper: set entry."""
         return self.add_edge(START, node)
 
     def compile(self) -> CompiledGraph:
+        """Test helper: compile."""
         return CompiledGraph(
             self._nodes, self._edges, self._max_steps, self._reducers
         )
@@ -699,11 +826,15 @@ class MiniGraph:
         """Read-only view of the builder's edges so far. See CompiledGraph.edges."""
         return MappingProxyType(self._edges)
 
-    async def ainvoke(self, state: PerpetuaState) -> PerpetuaState:
-        return await self.compile().ainvoke(state)
+    async def ainvoke(
+        self, state: PerpetuaState, *, gate: DispatchGate | None = None
+    ) -> PerpetuaState:
+        """Test helper: ainvoke."""
+        return await self.compile().ainvoke(state, gate=gate)
 
 
 def _is_interrupt(exc: Exception) -> bool:
+    """Report whether an exception is a human-in-the-loop interrupt."""
     return type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt")
 
 
@@ -712,6 +843,7 @@ def _interrupted_state(
     node: str,
     exc: Exception,
 ) -> PerpetuaState:
+    """Return the state recorded when a run is interrupted."""
     return state.merge(
         {
             "status": "interrupted",
@@ -722,4 +854,29 @@ def _interrupted_state(
                 "interrupt_payload": getattr(exc, "payload", None),
             },
         }
+    )
+
+
+def _enforce(decision: GateDecision, request: DispatchRequest | CommitRequest) -> GateDecision | None:
+    """Translate a gate decision into a stop result or raise GateRefused on refusal."""
+    if decision.verdict == "refuse":
+        raise GateRefused(decision, request)
+    if decision.verdict == "stop":
+        return decision
+    return None
+
+
+def _stopped(
+    state: PerpetuaState, node: str, steps: int, decision: GateDecision
+) -> GraphObservation:
+    """Terminal observation for a gate stop; nothing at the boundary was published."""
+    stopped = state.merge(
+        {
+            "status": "stopped",
+            "metadata": {**state.metadata, "stop_node": node, "stop_reason": decision.reason},
+        }
+    )
+    return GraphObservation(
+        GraphEvent("stopped", node=node, steps=steps, terminal_reason="stopped"),
+        stopped,
     )

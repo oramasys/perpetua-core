@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import re
 
 import pytest
 
@@ -8,6 +9,7 @@ from perpetua_core.graph.spec import EdgeSpec, GraphSpec, NodeSpec
 
 
 def _basic_spec() -> GraphSpec:
+    """Test helper: basic spec."""
     return GraphSpec.create(
         max_steps=20,
         nodes=(
@@ -24,22 +26,26 @@ def _basic_spec() -> GraphSpec:
 
 
 def test_node_spec_is_immutable() -> None:
+    """Node spec is immutable."""
     node = NodeSpec(name="route")
     with pytest.raises(FrozenInstanceError):
         node.name = "other"  # type: ignore[misc]
 
 
 def test_static_edge_requires_target() -> None:
+    """Static edge requires target."""
     with pytest.raises(ValueError, match="static edge requires target"):
         EdgeSpec(source="route", kind="static")
 
 
 def test_conditional_edge_rejects_static_target() -> None:
+    """Conditional edge rejects static target."""
     with pytest.raises(ValueError, match="conditional edge must not set target"):
         EdgeSpec(source="route", kind="conditional", target="respond")
 
 
 def test_metadata_is_deeply_frozen() -> None:
+    """Metadata is deeply frozen."""
     node = NodeSpec(name="a", metadata={"labels": ["x", "y"]})
 
     assert node.metadata["labels"] == ("x", "y")
@@ -48,6 +54,7 @@ def test_metadata_is_deeply_frozen() -> None:
 
 
 def test_graph_id_is_stable_across_input_order() -> None:
+    """Graph id is stable across input order."""
     a = GraphSpec.create(
         max_steps=20,
         nodes=(
@@ -79,7 +86,13 @@ def test_graph_id_is_stable_across_input_order() -> None:
     assert a.to_dict() == b.to_dict()
 
 
+def test_graph_id_is_stable_bare_sha256_hex() -> None:
+    """Graph id is stable bare sha256 hex."""
+    assert re.fullmatch(r"[0-9a-f]{64}", _basic_spec().graph_id)
+
+
 def test_graph_id_is_stable_when_equal_topology_records_differ_in_metadata() -> None:
+    """Graph id is stable when equal topology records differ in metadata."""
     nodes = (NodeSpec("a", metadata={"rank": 2}), NodeSpec("a", metadata={"rank": 1}))
     assert GraphSpec.create(max_steps=1, nodes=nodes).graph_id == GraphSpec.create(
         max_steps=1, nodes=tuple(reversed(nodes))
@@ -87,6 +100,7 @@ def test_graph_id_is_stable_when_equal_topology_records_differ_in_metadata() -> 
 
 
 def test_graph_spec_round_trips_json() -> None:
+    """Graph spec round trips json."""
     spec = _basic_spec()
 
     restored = GraphSpec.from_json(spec.to_json())
@@ -96,6 +110,7 @@ def test_graph_spec_round_trips_json() -> None:
 
 
 def test_unknown_schema_version_fails_closed() -> None:
+    """Unknown schema version fails closed."""
     payload = _basic_spec().to_dict()
     payload["schema_version"] = "999"
 
@@ -104,6 +119,7 @@ def test_unknown_schema_version_fails_closed() -> None:
 
 
 def test_graph_id_tampering_is_rejected() -> None:
+    """Graph id tampering is rejected."""
     payload = _basic_spec().to_dict()
     payload["nodes"][0]["name"] = "mutated"
 
@@ -112,6 +128,7 @@ def test_graph_id_tampering_is_rejected() -> None:
 
 
 def test_graph_spec_rejects_missing_identity_and_nonfinite_metadata() -> None:
+    """Graph spec rejects missing identity and nonfinite metadata."""
     payload = _basic_spec().to_dict()
     payload.pop("graph_id")
     with pytest.raises(ValueError, match="graph_id is required"):
@@ -122,5 +139,6 @@ def test_graph_spec_rejects_missing_identity_and_nonfinite_metadata() -> None:
 
 
 def test_non_json_metadata_is_rejected() -> None:
+    """Non json metadata is rejected."""
     with pytest.raises(TypeError, match="JSON-compatible"):
         NodeSpec("a", metadata={"bad": object()})
