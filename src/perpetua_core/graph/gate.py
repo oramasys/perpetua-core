@@ -18,6 +18,11 @@ Commit boundaries (``CommitRequest.boundary``): ``node`` before a node delta is
 merged, ``region`` before a fan-out region commits. After an allowed commit decision
 the scheduler publishes synchronously, with no ``await`` in between.
 
+Dispatch decisions are taken after the last observation yield and immediately before
+the guarded call, so a stop or revocation recorded while a consumer holds the
+observation iterator is honoured. ``steps`` on join, reducer and region-commit requests
+already counts the branches that settled successfully.
+
 A gate never cancels in-flight work and cannot undo an effect a callable already
 caused: settle-all semantics are unchanged. With no gate, behaviour and the event
 sequence are exactly the pre-T1 ones.

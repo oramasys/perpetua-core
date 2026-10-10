@@ -381,10 +381,6 @@ class CompiledGraph:
 
             current_node = node
             node_fn = self._node_for(current_node)
-            decision = await self._dispatch(gate, None, "node", (current_node,), steps)
-            if decision is not None:
-                yield _stopped(state, current_node, steps, decision)
-                return
             state = state.merge(
                 {"nodes_visited": [*state.nodes_visited, current_node]}
             )
@@ -395,6 +391,12 @@ class CompiledGraph:
                 state,
             )
 
+            # Ask the gate immediately before the call: a consumer may have changed
+            # stop or authority state while this generator was paused on the yield.
+            decision = await self._dispatch(gate, None, "node", (current_node,), steps)
+            if decision is not None:
+                yield _stopped(state, current_node, steps, decision)
+                return
             try:
                 delta = node_fn(state)
                 if inspect.isawaitable(delta):
@@ -526,13 +528,6 @@ class CompiledGraph:
         if edge.then != END and edge.then not in self._nodes:
             raise ValueError(f"MiniGraph fan-out resolved to unknown node {edge.then!r}")
 
-        decision = await self._dispatch(gate, None, "fanout", branches, steps, source)
-        if decision is not None:
-            stopped = _stopped(state, source, steps, decision)
-            result.stopped, result.state = True, stopped.state
-            yield stopped
-            return
-
         snapshot = state.merge({"nodes_visited": [*state.nodes_visited, *branches]})
         yield GraphObservation(
             GraphEvent(
@@ -547,7 +542,17 @@ class CompiledGraph:
         for name in branches:
             yield GraphObservation(GraphEvent("node.start", node=name, steps=steps), snapshot)
 
+        # One decision for the whole batch, taken after the last yield and
+        # immediately before any branch starts: a refusal or stop starts none.
+        decision = await self._dispatch(gate, None, "fanout", branches, steps, source)
+        if decision is not None:
+            stopped = _stopped(state, source, steps, decision)
+            result.stopped, result.state = True, stopped.state
+            yield stopped
+            return
         settled = await self._settle(branches, snapshot)
+        # Completed node executions now include every branch that settled ok.
+        completed = steps + sum(1 for s in settled if s.error is None)
 
         interrupted = [s for s in settled if s.error is not None and _is_interrupt(s.error)]
         if interrupted:
@@ -568,7 +573,7 @@ class CompiledGraph:
             return
 
         if edge.join.kind == "custom":
-            decision = await self._dispatch(gate, None, "join", branches, steps, source)
+            decision = await self._dispatch(gate, None, "join", branches, completed, source)
             if decision is not None:
                 stopped = _stopped(state, source, steps, decision)
                 result.stopped, result.state = True, stopped.state
@@ -576,15 +581,14 @@ class CompiledGraph:
                 return
         admitted = self._admit(source, edge.join, settled)
         admitted_names = tuple(item.name for item in admitted)
-        decision = await self._dispatch(gate, None, "reducer", admitted_names, steps, source)
+        decision = await self._dispatch(gate, None, "reducer", admitted_names, completed, source)
         if decision is not None:
             stopped = _stopped(state, source, steps, decision)
             result.stopped, result.state = True, stopped.state
             yield stopped
             return
         merged, provenance = self._fold(snapshot, admitted)
-        new_steps = steps + sum(1 for s in settled if s.error is None)
-        decision = await self._commit(gate, "region", admitted_names, steps, source)
+        decision = await self._commit(gate, "region", admitted_names, completed, source)
         if decision is not None:
             stopped = _stopped(state, source, steps, decision)
             result.stopped, result.state = True, stopped.state
@@ -592,7 +596,7 @@ class CompiledGraph:
             return
         # Publish synchronously after the commit decision: no await in between.
         committed = snapshot.merge(merged)
-        steps = new_steps
+        steps = completed
 
         for item in admitted:
             yield GraphObservation(

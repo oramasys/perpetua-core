@@ -222,7 +222,7 @@ async def test_stop_ends_the_run_without_committing():
     assert "node.end" not in [o.event.kind for o in observations]
 
 
-async def test_stop_raises_from_ainvoke_only_when_asked():
+async def test_stop_returns_stopped_state_from_ainvoke():
     gate = RecordingGate(stop={("dispatch", "node")})
     state = await linear([]).compile().ainvoke(fresh(), gate=gate)
     assert state.status == "stopped"
@@ -298,3 +298,64 @@ def test_gate_names_are_exported_from_the_graph_package():
     for name in ("DispatchGate", "GateDecision", "GateRefused", "GateStopped",
                  "DispatchRequest", "CommitRequest"):
         assert name in g.__all__
+
+
+# --- review fixes: check immediately before the call; counts after settling --
+
+
+class LatchGate(RecordingGate):
+    """Stops once ``latched`` is set, as a consumer would between observations."""
+
+    latched = False
+
+    def _decide(self, phase: str, boundary: str) -> GateDecision:
+        if self.latched:
+            return GateDecision.stop("consumer.stop")
+        return super()._decide(phase, boundary)
+
+
+async def test_stop_requested_while_paused_at_node_start_prevents_the_call():
+    calls: list[str] = []
+    gate = LatchGate()
+    kinds = []
+    async for obs in linear(calls).compile().aobserve(fresh(), gate=gate):
+        kinds.append(obs.event.kind)
+        if obs.event.kind == "node.start":
+            gate.latched = True  # consumer asks to stop while the iterator is paused
+    assert calls == []
+    assert kinds[-1] == "stopped"
+
+
+async def test_stop_requested_while_paused_at_superstep_start_starts_no_branch():
+    calls: list[str] = []
+    gate = LatchGate()
+    async for obs in region(calls).compile().aobserve(fresh(), gate=gate):
+        if obs.event.kind == "superstep.start":
+            gate.latched = True
+    assert calls == []
+
+
+class CountingGate(RecordingGate):
+    def __init__(self) -> None:
+        super().__init__()
+        self.steps: dict[tuple[str, str], int] = {}
+
+    async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        self.steps[("dispatch", request.boundary)] = request.steps
+        return await super().before_dispatch(request)
+
+    async def before_commit(self, request: CommitRequest) -> GateDecision:
+        self.steps[("commit", request.boundary)] = request.steps
+        return await super().before_commit(request)
+
+
+async def test_region_requests_count_completed_branches():
+    def admit(outcomes):
+        return [o.name for o in outcomes if o.ok]
+
+    gate = CountingGate()
+    await region([], join=Join("custom", fn=admit)).compile().ainvoke(fresh(), gate=gate)
+    assert gate.steps[("dispatch", "fanout")] == 1  # only plan has completed
+    assert gate.steps[("dispatch", "join")] == 3  # plan + two settled branches
+    assert gate.steps[("dispatch", "reducer")] == 3
+    assert gate.steps[("commit", "region")] == 3
