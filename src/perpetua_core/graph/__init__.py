@@ -10,6 +10,14 @@ from perpetua_core.graph.engine import (
     MaxStepsExceeded,
     MiniGraph,
 )
+from perpetua_core.graph.gate import (
+    CommitRequest,
+    DispatchGate,
+    DispatchRequest,
+    GateDecision,
+    GateRefused,
+    GateStopped,
+)
 from perpetua_core.graph.reducers import Reducer, ReducerConflict
 
 __all__ = [
@@ -25,4 +33,10 @@ __all__ = [
     "ReducerConflict",
     "START",
     "END",
+    "DispatchGate",
+    "DispatchRequest",
+    "CommitRequest",
+    "GateDecision",
+    "GateRefused",
+    "GateStopped",
 ]
