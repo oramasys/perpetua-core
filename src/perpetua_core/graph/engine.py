@@ -63,6 +63,7 @@ class ConditionalEdge:
     declared_targets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         object.__setattr__(
             self,
             "declared_targets",
@@ -95,6 +96,7 @@ class Join:
     fn: JoinAdmitFn | None = None
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         if self.kind not in JOIN_KINDS:
             raise ValueError(f"unsupported join kind: {self.kind!r}")
         if self.kind == "quorum":
@@ -122,6 +124,7 @@ class FanOut:
     join: Join = field(default_factory=Join)
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         branches = tuple(self.branches)
         if len(branches) < 2:
             raise ValueError("FanOut requires at least two branches")
@@ -191,6 +194,7 @@ class MaxStepsExceeded(RuntimeError):
     """
 
     def __init__(self, steps: int, last_node: str) -> None:
+        """Record the step count and the node that exceeded the bound."""
         self.steps = steps
         self.last_node = last_node
         super().__init__(
@@ -205,6 +209,7 @@ def _describe_topology(
     max_steps: int,
     reducers: Mapping[str, Reducer] | None = None,
 ) -> GraphSpec:
+    """Return a deterministic description of nodes, edges and entry for identity."""
     node_specs = tuple(
         NodeSpec(name=name, implementation_ref=stable_callable_ref(fn))
         for name, fn in nodes.items()
@@ -267,6 +272,7 @@ def _describe_topology(
 
 @dataclass(slots=True)
 class _Settled:
+    """Outcome of one settled fan-out branch: its delta or its error."""
     name: str
     delta: NodeDelta | None
     error: Exception | None
@@ -274,6 +280,7 @@ class _Settled:
 
 @dataclass(slots=True)
 class _RegionResult:
+    """Outcome of a settled fan-out region: admitted deltas and steps."""
     state: PerpetuaState
     steps: int
     interrupted: bool = False
@@ -290,6 +297,7 @@ class CompiledGraph:
         max_steps: int,
         reducers: Mapping[str, Reducer] | None = None,
     ) -> None:
+        """Initialise the instance and validate its arguments."""
         self._nodes = dict(nodes)
         self._edges = dict(edges)
         self._max_steps = max_steps
@@ -497,6 +505,7 @@ class CompiledGraph:
         steps: int,
         source: str | None = None,
     ) -> GateDecision | None:
+        """Test helper: commit."""
         if gate is None:
             return None
         request = CommitRequest(boundary, nodes, steps, source)  # type: ignore[arg-type]
@@ -625,6 +634,7 @@ class CompiledGraph:
         """Run every branch on one snapshot; return outcomes in branch order."""
 
         async def call(name: str) -> _Settled:
+            """Run one branch node and capture its outcome without raising."""
             try:
                 # Isolated copy: a branch mutating its input cannot leak into a
                 # sibling, the interrupted state or the committed state.
@@ -713,6 +723,7 @@ class CompiledGraph:
         return merged, provenance
 
     def _node_for(self, name: str) -> NodeFn:
+        """Test helper: node for."""
         try:
             return self._nodes[name]
         except KeyError:
@@ -721,6 +732,7 @@ class CompiledGraph:
             ) from None
 
     def _resolve_edge(self, edge: Edge, state: PerpetuaState) -> str:
+        """Test helper: resolve edge."""
         if isinstance(edge, ConditionalEdge):
             target = edge.router(state)
         elif callable(edge):
@@ -745,16 +757,19 @@ class MiniGraph:
     """Mutable graph builder; ``compile()`` creates a detached runtime snapshot."""
 
     def __init__(self, *, max_steps: int = _DEFAULT_MAX_STEPS) -> None:
+        """Initialise the instance and validate its arguments."""
         self._nodes: dict[str, NodeFn] = {}
         self._edges: dict[str, Edge] = {}
         self._reducers: dict[str, Reducer] = {}
         self._max_steps = max_steps
 
     def add_node(self, name: str, fn: NodeFn) -> "MiniGraph":
+        """Test helper: add node."""
         self._nodes[name] = fn
         return self
 
     def add_edge(self, src: str, dst: Edge) -> "MiniGraph":
+        """Test helper: add edge."""
         if isinstance(dst, FanOut) and src == START:
             raise ValueError("a fan-out region needs a source node; START cannot fan out")
         self._edges[src] = dst
@@ -772,9 +787,11 @@ class MiniGraph:
         return self
 
     def set_entry(self, node: str) -> "MiniGraph":
+        """Test helper: set entry."""
         return self.add_edge(START, node)
 
     def compile(self) -> CompiledGraph:
+        """Test helper: compile."""
         return CompiledGraph(
             self._nodes, self._edges, self._max_steps, self._reducers
         )
@@ -812,10 +829,12 @@ class MiniGraph:
     async def ainvoke(
         self, state: PerpetuaState, *, gate: DispatchGate | None = None
     ) -> PerpetuaState:
+        """Test helper: ainvoke."""
         return await self.compile().ainvoke(state, gate=gate)
 
 
 def _is_interrupt(exc: Exception) -> bool:
+    """Report whether an exception is a human-in-the-loop interrupt."""
     return type(exc).__name__ == "Interrupt" and hasattr(exc, "prompt")
 
 
@@ -824,6 +843,7 @@ def _interrupted_state(
     node: str,
     exc: Exception,
 ) -> PerpetuaState:
+    """Return the state recorded when a run is interrupted."""
     return state.merge(
         {
             "status": "interrupted",
@@ -838,6 +858,7 @@ def _interrupted_state(
 
 
 def _enforce(decision: GateDecision, request: DispatchRequest | CommitRequest) -> GateDecision | None:
+    """Translate a gate decision into a stop result or raise GateRefused on refusal."""
     if decision.verdict == "refuse":
         raise GateRefused(decision, request)
     if decision.verdict == "stop":

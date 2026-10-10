@@ -9,6 +9,7 @@ OptHint = Literal["speed", "quality", "reasoning"]
 
 
 class PerpetuaState(BaseModel):
+    """Pydantic state carried between graph nodes."""
     model_config = ConfigDict(protected_namespaces=())
 
     session_id: str

@@ -47,6 +47,7 @@ class GateDecision:
     reason: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate the fields at construction and fail closed on bad input."""
         if self.verdict not in _VERDICTS:
             raise ValueError(f"unknown gate verdict: {self.verdict!r}")
         if self.verdict == "allow":
@@ -57,14 +58,17 @@ class GateDecision:
 
     @classmethod
     def allow(cls) -> GateDecision:
+        """Build an allow decision."""
         return cls("allow")
 
     @classmethod
     def refuse(cls, reason: str) -> GateDecision:
+        """Build a refusal carrying a required reason code."""
         return cls("refuse", reason)
 
     @classmethod
     def stop(cls, reason: str) -> GateDecision:
+        """Build a stop decision carrying a required reason code."""
         return cls("stop", reason)
 
 
@@ -92,15 +96,18 @@ class CommitRequest:
 class DispatchGate(Protocol):
     """Implemented outside Core; bound to one invocation (run, lease, epoch)."""
 
-    async def before_dispatch(self, request: DispatchRequest) -> GateDecision: ...
+    async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Decide whether the guarded call may start."""
 
-    async def before_commit(self, request: CommitRequest) -> GateDecision: ...
+    async def before_commit(self, request: CommitRequest) -> GateDecision:
+        """Decide whether the pending delta may be published."""
 
 
 class GateRefused(RuntimeError):
     """A gate refused a boundary. Nothing at that boundary was published."""
 
     def __init__(self, decision: GateDecision, request: DispatchRequest | CommitRequest) -> None:
+        """Keep the refusing decision and the request it refused."""
         self.decision = decision
         self.request = request
         super().__init__(f"gate refused {request.boundary} {request.nodes!r}: {decision.reason}")
@@ -111,6 +118,7 @@ class GateStopped(RuntimeError):
     ends the run with a ``stopped`` terminal event instead."""
 
     def __init__(self, decision: GateDecision) -> None:
+        """Keep the stop decision that ended the run."""
         self.decision = decision
         super().__init__(f"gate stopped the run: {decision.reason}")
 

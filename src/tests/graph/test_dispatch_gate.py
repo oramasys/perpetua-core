@@ -23,6 +23,7 @@ from perpetua_core.state import PerpetuaState
 
 
 def fresh() -> PerpetuaState:
+    """Test helper: fresh."""
     return PerpetuaState(session_id="t1")
 
 
@@ -31,11 +32,13 @@ class RecordingGate:
 
     def __init__(self, *, refuse: set[tuple[str, str]] | None = None,
                  stop: set[tuple[str, str]] | None = None) -> None:
+        """Initialise the instance and validate its arguments."""
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
         self.refuse = refuse or set()
         self.stop = stop or set()
 
     def _decide(self, phase: str, boundary: str) -> GateDecision:
+        """Test helper: decide."""
         if (phase, boundary) in self.refuse:
             return GateDecision.refuse(f"{phase}.{boundary}.refused")
         if (phase, boundary) in self.stop:
@@ -43,18 +46,22 @@ class RecordingGate:
         return GateDecision.allow()
 
     async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Test helper: before dispatch."""
         self.calls.append(("dispatch", request.boundary, request.nodes))
         return self._decide("dispatch", request.boundary)
 
     async def before_commit(self, request: CommitRequest) -> GateDecision:
+        """Test helper: before commit."""
         self.calls.append(("commit", request.boundary, request.nodes))
         return self._decide("commit", request.boundary)
 
 
 def linear(calls: list[str]) -> MiniGraph:
+    """Test helper: linear."""
     graph = MiniGraph()
 
     def a(_: PerpetuaState) -> dict:
+        """Test helper: a."""
         calls.append("a")
         return {"scratchpad": {"a": 1}}
 
@@ -65,11 +72,14 @@ def linear(calls: list[str]) -> MiniGraph:
 
 
 def region(calls: list[str], *, join: Join | None = None, reducer: bool = False) -> MiniGraph:
+    """Test helper: region."""
     graph = MiniGraph()
     graph.add_node("plan", lambda s: {})
 
     def branch(name: str):
+        """Test helper: branch."""
         async def run(_: PerpetuaState) -> dict:
+            """Test helper: run."""
             calls.append(name)
             await asyncio.sleep(0)
             return {"messages": [{"m": name}]}
@@ -84,6 +94,7 @@ def region(calls: list[str], *, join: Join | None = None, reducer: bool = False)
     graph.add_edge("after", END)
     if reducer:
         def fold(current: Any, values: tuple[Any, ...]) -> Any:
+            """Test helper: fold."""
             calls.append("reducer")
             out = list(current or [])
             for value in values:
@@ -100,6 +111,7 @@ def region(calls: list[str], *, join: Join | None = None, reducer: bool = False)
 
 
 async def test_no_gate_keeps_existing_event_sequence():
+    """No gate keeps existing event sequence."""
     calls: list[str] = []
     plain = [o.event for o in [x async for x in linear(calls).compile().aobserve(fresh())]]
     gated = [o.event async for o in linear(calls).compile().aobserve(fresh(), gate=RecordingGate())]
@@ -110,17 +122,20 @@ async def test_no_gate_keeps_existing_event_sequence():
 
 
 async def test_linear_node_is_guarded_before_dispatch_and_before_commit():
+    """Linear node is guarded before dispatch and before commit."""
     gate = RecordingGate()
     await linear([]).compile().ainvoke(fresh(), gate=gate)
     assert gate.calls == [("dispatch", "node", ("a",)), ("commit", "node", ("a",))]
 
 
 async def test_router_is_guarded_before_it_runs():
+    """Router is guarded before it runs."""
     routed: list[str] = []
     graph = MiniGraph()
     graph.add_node("a", lambda s: {})
 
     def router(_: PerpetuaState) -> str:
+        """Test helper: router."""
         routed.append("router")
         return END
 
@@ -134,6 +149,7 @@ async def test_router_is_guarded_before_it_runs():
 
 
 async def test_region_boundaries_in_order():
+    """Region boundaries in order."""
     gate = RecordingGate()
     await region([]).compile().ainvoke(fresh(), gate=gate)
     assert gate.calls == [
@@ -148,9 +164,11 @@ async def test_region_boundaries_in_order():
 
 
 async def test_custom_join_is_guarded_before_it_runs():
+    """Custom join is guarded before it runs."""
     joined: list[str] = []
 
     def admit(outcomes):
+        """Test helper: admit."""
         joined.append("join")
         return [o.name for o in outcomes if o.ok]
 
@@ -164,6 +182,7 @@ async def test_custom_join_is_guarded_before_it_runs():
 
 
 async def test_refused_dispatch_never_calls_the_node():
+    """Refused dispatch never calls the node."""
     calls: list[str] = []
     gate = RecordingGate(refuse={("dispatch", "node")})
     with pytest.raises(GateRefused) as info:
@@ -173,6 +192,7 @@ async def test_refused_dispatch_never_calls_the_node():
 
 
 async def test_refused_commit_runs_the_node_but_publishes_nothing():
+    """Refused commit runs the node but publishes nothing."""
     calls: list[str] = []
     gate = RecordingGate(refuse={("commit", "node")})
     seen = []
@@ -184,6 +204,7 @@ async def test_refused_commit_runs_the_node_but_publishes_nothing():
 
 
 async def test_refused_batch_dispatches_no_branch():
+    """Refused batch dispatches no branch."""
     calls: list[str] = []
     gate = RecordingGate(refuse={("dispatch", "fanout")})
     with pytest.raises(GateRefused):
@@ -192,6 +213,7 @@ async def test_refused_batch_dispatches_no_branch():
 
 
 async def test_refused_reducer_never_folds_and_never_commits():
+    """Refused reducer never folds and never commits."""
     calls: list[str] = []
     gate = RecordingGate(refuse={("dispatch", "reducer")})
     seen = []
@@ -203,6 +225,7 @@ async def test_refused_reducer_never_folds_and_never_commits():
 
 
 async def test_refused_region_commit_publishes_nothing():
+    """Refused region commit publishes nothing."""
     gate = RecordingGate(refuse={("commit", "region")})
     seen = []
     with pytest.raises(GateRefused):
@@ -212,6 +235,7 @@ async def test_refused_region_commit_publishes_nothing():
 
 
 async def test_stop_ends_the_run_without_committing():
+    """Stop ends the run without committing."""
     calls: list[str] = []
     gate = RecordingGate(stop={("commit", "node")})
     observations = [o async for o in linear(calls).compile().aobserve(fresh(), gate=gate)]
@@ -223,6 +247,7 @@ async def test_stop_ends_the_run_without_committing():
 
 
 async def test_stop_returns_stopped_state_from_ainvoke():
+    """Stop returns stopped state from ainvoke."""
     gate = RecordingGate(stop={("dispatch", "node")})
     state = await linear([]).compile().ainvoke(fresh(), gate=gate)
     assert state.status == "stopped"
@@ -232,8 +257,11 @@ async def test_stop_returns_stopped_state_from_ainvoke():
 
 
 async def test_gate_error_propagates_and_nothing_commits():
+    """Gate error propagates and nothing commits."""
     class Broken(RecordingGate):
+        """Test helper Broken."""
         async def before_commit(self, request):
+            """Test helper: before commit."""
             raise RuntimeError("ledger down")
 
     calls: list[str] = []
@@ -242,8 +270,11 @@ async def test_gate_error_propagates_and_nothing_commits():
 
 
 async def test_non_decision_result_is_refused():
+    """Non decision result is refused."""
     class Sloppy(RecordingGate):
+        """Test helper Sloppy."""
         async def before_dispatch(self, request):
+            """Test helper: before dispatch."""
             return True  # not a GateDecision
 
     with pytest.raises(TypeError):
@@ -251,6 +282,7 @@ async def test_non_decision_result_is_refused():
 
 
 def test_decision_constructors_validate_reasons():
+    """Decision constructors validate reasons."""
     assert GateDecision.allow().verdict == "allow"
     with pytest.raises(ValueError):
         GateDecision.refuse("")
@@ -263,16 +295,19 @@ def test_decision_constructors_validate_reasons():
 
 
 async def test_miniGraph_ainvoke_forwards_the_gate():
+    """Minigraph ainvoke forwards the gate."""
     gate = RecordingGate()
     await linear([]).ainvoke(fresh(), gate=gate)
     assert gate.calls[0] == ("dispatch", "node", ("a",))
 
 
 async def test_gate_stopped_exported_for_callers():
+    """Gate stopped exported for callers."""
     assert issubclass(GateStopped, RuntimeError)
 
 
 async def test_stop_inside_a_region_commits_nothing_and_ends_the_run():
+    """Stop inside a region commits nothing and ends the run."""
     calls: list[str] = []
     gate = RecordingGate(stop={("commit", "region")})
     observations = [o async for o in region(calls).compile().aobserve(fresh(), gate=gate)]
@@ -284,6 +319,7 @@ async def test_stop_inside_a_region_commits_nothing_and_ends_the_run():
 
 
 async def test_stop_before_a_batch_starts_no_branch():
+    """Stop before a batch starts no branch."""
     calls: list[str] = []
     gate = RecordingGate(stop={("dispatch", "fanout")})
     state = await region(calls).compile().ainvoke(fresh(), gate=gate)
@@ -293,6 +329,7 @@ async def test_stop_before_a_batch_starts_no_branch():
 
 
 def test_gate_names_are_exported_from_the_graph_package():
+    """Gate names are exported from the graph package."""
     import perpetua_core.graph as g
 
     for name in ("DispatchGate", "GateDecision", "GateRefused", "GateStopped",
@@ -309,12 +346,14 @@ class LatchGate(RecordingGate):
     latched = False
 
     def _decide(self, phase: str, boundary: str) -> GateDecision:
+        """Test helper: decide."""
         if self.latched:
             return GateDecision.stop("consumer.stop")
         return super()._decide(phase, boundary)
 
 
 async def test_stop_requested_while_paused_at_node_start_prevents_the_call():
+    """Stop requested while paused at node start prevents the call."""
     calls: list[str] = []
     gate = LatchGate()
     kinds = []
@@ -327,6 +366,7 @@ async def test_stop_requested_while_paused_at_node_start_prevents_the_call():
 
 
 async def test_stop_requested_while_paused_at_superstep_start_starts_no_branch():
+    """Stop requested while paused at superstep start starts no branch."""
     calls: list[str] = []
     gate = LatchGate()
     async for obs in region(calls).compile().aobserve(fresh(), gate=gate):
@@ -336,21 +376,27 @@ async def test_stop_requested_while_paused_at_superstep_start_starts_no_branch()
 
 
 class CountingGate(RecordingGate):
+    """Test helper CountingGate."""
     def __init__(self) -> None:
+        """Initialise the instance and validate its arguments."""
         super().__init__()
         self.steps: dict[tuple[str, str], int] = {}
 
     async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Test helper: before dispatch."""
         self.steps[("dispatch", request.boundary)] = request.steps
         return await super().before_dispatch(request)
 
     async def before_commit(self, request: CommitRequest) -> GateDecision:
+        """Test helper: before commit."""
         self.steps[("commit", request.boundary)] = request.steps
         return await super().before_commit(request)
 
 
 async def test_region_requests_count_completed_branches():
+    """Region requests count completed branches."""
     def admit(outcomes):
+        """Test helper: admit."""
         return [o.name for o in outcomes if o.ok]
 
     gate = CountingGate()
