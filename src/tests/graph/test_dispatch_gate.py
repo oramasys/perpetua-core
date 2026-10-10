@@ -6,6 +6,8 @@ Core owns only the protocol and the call sites. Whoever implements the gate
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any
 
 import pytest
@@ -54,6 +56,19 @@ class RecordingGate:
         """Test helper: before commit."""
         self.calls.append(("commit", request.boundary, request.nodes))
         return self._decide("commit", request.boundary)
+
+
+class SettlingGate(RecordingGate):
+    """Records the optional post-publication lifecycle callback."""
+
+    def __init__(self) -> None:
+        """Initialise the callback record alongside ordinary gate decisions."""
+        super().__init__()
+        self.settled: list[CommitRequest] = []
+
+    async def after_commit(self, request: CommitRequest) -> None:
+        """Record the exact identity Core associated with the published delta."""
+        self.settled.append(request)
 
 
 def linear(calls: list[str]) -> MiniGraph:
@@ -126,6 +141,19 @@ async def test_linear_node_is_guarded_before_dispatch_and_before_commit():
     gate = RecordingGate()
     await linear([]).compile().ainvoke(fresh(), gate=gate)
     assert gate.calls == [("dispatch", "node", ("a",)), ("commit", "node", ("a",))]
+
+
+async def test_post_commit_callback_receives_the_published_delta_digest() -> None:
+    """Core exposes a neutral digest only after the synchronous publish boundary."""
+    gate = SettlingGate()
+    state = await linear([]).compile().ainvoke(fresh(), gate=gate)
+
+    expected = hashlib.sha256(
+        json.dumps({"scratchpad": {"a": 1}}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert state.scratchpad == {"a": 1}
+    assert len(gate.settled) == 1
+    assert gate.settled[0].result_digest == expected
 
 
 async def test_router_is_guarded_before_it_runs():

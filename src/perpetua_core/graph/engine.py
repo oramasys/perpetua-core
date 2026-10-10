@@ -13,7 +13,9 @@ outside this module.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -46,6 +48,19 @@ _DEFAULT_MAX_STEPS = 200
 
 NodeDelta: TypeAlias = dict[str, Any]
 NodeResult: TypeAlias = NodeDelta | Awaitable[NodeDelta]
+
+
+def _delta_digest(delta: NodeDelta) -> str:
+    """Return the stable digest an external commit lifecycle binds to.
+
+    A gated commit refuses non-JSON deltas instead of producing a lossy digest.
+    Ungated legacy execution never calls this function.
+    """
+    try:
+        encoded = json.dumps(delta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise TypeError("gated commit delta must be canonical JSON") from error
+    return hashlib.sha256(encoded).hexdigest()
 NodeFn: TypeAlias = Callable[[PerpetuaState], NodeResult]
 EdgeFn: TypeAlias = Callable[[PerpetuaState], str]
 
@@ -430,12 +445,15 @@ class CompiledGraph:
                     f"{type(delta).__name__}; expected dict delta"
                 )
 
-            decision = await self._commit(gate, "node", (current_node,), steps)
+            decision, request = await self._commit(
+                gate, "node", (current_node,), steps, delta=delta
+            )
             if decision is not None:
                 yield _stopped(state, current_node, steps, decision)
                 return
             # Publish synchronously after the commit decision: no await in between.
             state = state.merge(delta)
+            await self._after_commit(gate, request)
             steps += 1
             yield GraphObservation(
                 GraphEvent("node.end", node=current_node, steps=steps),
@@ -504,13 +522,40 @@ class CompiledGraph:
         nodes: tuple[str, ...],
         steps: int,
         source: str | None = None,
-    ) -> GateDecision | None:
-        """Test helper: commit."""
+        *,
+        delta: NodeDelta,
+    ) -> tuple[GateDecision | None, CommitRequest | None]:
+        """Ask before publication and retain the request for optional settlement."""
         if gate is None:
-            return None
-        request = CommitRequest(boundary, nodes, steps, source)  # type: ignore[arg-type]
+            return None, None
+        request = CommitRequest(  # type: ignore[arg-type]
+            boundary,
+            nodes,
+            steps,
+            source,
+            _delta_digest(delta),
+        )
         decision = checked(await gate.before_commit(request))
-        return _enforce(decision, request)
+        return _enforce(decision, request), request
+
+    async def _after_commit(
+        self, gate: DispatchGate | None, request: CommitRequest | None
+    ) -> None:
+        """Run an optional external settlement hook after synchronous publication.
+
+        Existing dispatch gates remain source-compatible: a missing callback is
+        a no-op. If a supplied callback fails, Core stops scheduling and leaves
+        its owner to account for the already-published delta conservatively.
+        """
+        if gate is None or request is None:
+            return
+        callback = getattr(gate, "after_commit", None)
+        if callback is None:
+            return
+        result = callback(request)
+        if not inspect.isawaitable(result):
+            raise TypeError("gate after_commit must return an awaitable")
+        await result
 
     async def _run_region(
         self,
@@ -597,7 +642,9 @@ class CompiledGraph:
             yield stopped
             return
         merged, provenance = self._fold(snapshot, admitted)
-        decision = await self._commit(gate, "region", admitted_names, completed, source)
+        decision, request = await self._commit(
+            gate, "region", admitted_names, completed, source, delta=merged
+        )
         if decision is not None:
             stopped = _stopped(state, source, steps, decision)
             result.stopped, result.state = True, stopped.state
@@ -605,6 +652,7 @@ class CompiledGraph:
             return
         # Publish synchronously after the commit decision: no await in between.
         committed = snapshot.merge(merged)
+        await self._after_commit(gate, request)
         steps = completed
 
         for item in admitted:

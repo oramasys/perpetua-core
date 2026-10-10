@@ -84,12 +84,19 @@ class DispatchRequest:
 
 @dataclass(frozen=True, slots=True)
 class CommitRequest:
-    """What is about to be published into graph state."""
+    """What is about to be published into graph state.
+
+    ``result_digest`` is a Core-neutral canonical JSON digest of the pending
+    delta. It lets an external gate bind durable commit preparation and
+    settlement to the exact content Core publishes without teaching the
+    scheduler about holds, budgets, or terminal outcomes.
+    """
 
     boundary: CommitBoundary
     nodes: tuple[str, ...]
     steps: int
     source: str | None = None
+    result_digest: str | None = None
 
 
 @runtime_checkable
