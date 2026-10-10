@@ -74,12 +74,18 @@ class GateDecision:
 
 @dataclass(frozen=True, slots=True)
 class DispatchRequest:
-    """What is about to execute. ``steps`` counts completed node executions."""
+    """What is about to execute. ``steps`` counts completed node executions.
+
+    ``batch_id`` is an opaque, scheduler-minted correlation value for one
+    fan-out region. Core only passes it through; a gate may use it to connect
+    dispatch-time accounting with the later region publication.
+    """
 
     boundary: DispatchBoundary
     nodes: tuple[str, ...]
     steps: int
     source: str | None = None
+    batch_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +103,7 @@ class CommitRequest:
     steps: int
     source: str | None = None
     result_digest: str | None = None
+    batch_id: str | None = None
 
 
 @runtime_checkable

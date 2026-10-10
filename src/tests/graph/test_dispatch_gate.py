@@ -71,6 +71,28 @@ class SettlingGate(RecordingGate):
         self.settled.append(request)
 
 
+class BatchTrackingGate(RecordingGate):
+    """Captures the opaque fan-out correlation token at both boundaries."""
+
+    def __init__(self) -> None:
+        """Initialise empty boundary records."""
+        super().__init__()
+        self.fanout: DispatchRequest | None = None
+        self.region: CommitRequest | None = None
+
+    async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Record the one fan-out request without changing admission."""
+        if request.boundary == "fanout":
+            self.fanout = request
+        return await super().before_dispatch(request)
+
+    async def before_commit(self, request: CommitRequest) -> GateDecision:
+        """Record the one region publication request without changing admission."""
+        if request.boundary == "region":
+            self.region = request
+        return await super().before_commit(request)
+
+
 def linear(calls: list[str]) -> MiniGraph:
     """Test helper: linear."""
     graph = MiniGraph()
@@ -154,6 +176,19 @@ async def test_post_commit_callback_receives_the_published_delta_digest() -> Non
     assert state.scratchpad == {"a": 1}
     assert len(gate.settled) == 1
     assert gate.settled[0].result_digest == expected
+
+
+async def test_region_threads_one_opaque_batch_id_from_dispatch_to_commit() -> None:
+    """A fan-out's opaque batch token remains stable through region publication."""
+    gate = BatchTrackingGate()
+
+    await region([]).compile().ainvoke(fresh(), gate=gate)
+
+    assert gate.fanout is not None
+    assert gate.region is not None
+    assert isinstance(gate.fanout.batch_id, str)
+    assert gate.fanout.batch_id
+    assert gate.region.batch_id == gate.fanout.batch_id
 
 
 async def test_router_is_guarded_before_it_runs():

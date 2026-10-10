@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -501,6 +502,7 @@ class CompiledGraph:
         nodes: tuple[str, ...],
         steps: int,
         source: str | None = None,
+        batch_id: str | None = None,
     ) -> GateDecision | None:
         """Ask the gate before a boundary runs. Returns a stop decision, else None.
 
@@ -511,7 +513,7 @@ class CompiledGraph:
             return None
         if boundary == "router" and not (isinstance(edge, ConditionalEdge) or callable(edge)):
             return None
-        request = DispatchRequest(boundary, nodes, steps, source)  # type: ignore[arg-type]
+        request = DispatchRequest(boundary, nodes, steps, source, batch_id)  # type: ignore[arg-type]
         decision = checked(await gate.before_dispatch(request))
         return _enforce(decision, request)
 
@@ -522,6 +524,7 @@ class CompiledGraph:
         nodes: tuple[str, ...],
         steps: int,
         source: str | None = None,
+        batch_id: str | None = None,
         *,
         delta: NodeDelta,
     ) -> tuple[GateDecision | None, CommitRequest | None]:
@@ -534,6 +537,7 @@ class CompiledGraph:
             steps,
             source,
             _delta_digest(delta),
+            batch_id,
         )
         decision = checked(await gate.before_commit(request))
         return _enforce(decision, request), request
@@ -598,7 +602,10 @@ class CompiledGraph:
 
         # One decision for the whole batch, taken after the last yield and
         # immediately before any branch starts: a refusal or stop starts none.
-        decision = await self._dispatch(gate, None, "fanout", branches, steps, source)
+        batch_id = secrets.token_urlsafe(18)
+        decision = await self._dispatch(
+            gate, None, "fanout", branches, steps, source, batch_id
+        )
         if decision is not None:
             stopped = _stopped(state, source, steps, decision)
             result.stopped, result.state = True, stopped.state
@@ -643,7 +650,13 @@ class CompiledGraph:
             return
         merged, provenance = self._fold(snapshot, admitted)
         decision, request = await self._commit(
-            gate, "region", admitted_names, completed, source, delta=merged
+            gate,
+            "region",
+            admitted_names,
+            completed,
+            source,
+            batch_id,
+            delta=merged,
         )
         if decision is not None:
             stopped = _stopped(state, source, steps, decision)
