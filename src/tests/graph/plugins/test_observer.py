@@ -133,3 +133,81 @@ async def test_plugin_delivery_is_registration_order_and_fail_closed() -> None:
         )
 
     assert calls == ["first:edge.selected", "broken:edge.selected"]
+
+
+@pytest.mark.asyncio
+async def test_run_with_plugins_supports_optional_delivery_and_gate() -> None:
+    from perpetua_core.graph.gate import DispatchGate, GateDecision, DispatchRequest, CommitRequest
+
+    graph = MiniGraph().add_node(
+        "work",
+        lambda s: {"scratchpad": {**s.scratchpad, "count": 1}},
+    ).set_entry("work")
+
+    class DeliverySpy:
+        def __init__(self) -> None:
+            self.kinds: list[str] = []
+
+        def on_observation(self, observation: GraphObservation) -> None:
+            self.kinds.append(observation.event.kind)
+
+    class GateSpy(DispatchGate):
+        def __init__(self) -> None:
+            self.dispatched: list[str] = []
+
+        async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+            self.dispatched.append(request.boundary)
+            return GateDecision.allow()
+
+        async def before_commit(self, request: CommitRequest) -> GateDecision:
+            return GateDecision.allow()
+
+    delivery = DeliverySpy()
+    gate = GateSpy()
+
+    res = await run_with_plugins(
+        graph,
+        state(),
+        delivery=delivery,
+        gate=gate,
+    )
+    assert res.status == "done"
+    assert "node.start" in delivery.kinds
+    assert "node" in gate.dispatched
+
+
+@pytest.mark.asyncio
+async def test_run_with_plugins_gate_stops_execution() -> None:
+    from perpetua_core.graph.gate import DispatchGate, GateDecision, DispatchRequest, CommitRequest
+
+    graph = MiniGraph().add_node(
+        "work",
+        lambda s: {"scratchpad": {**s.scratchpad, "count": 1}},
+    ).set_entry("work")
+
+    class StopGate(DispatchGate):
+        async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+            if request.boundary == "node":
+                return GateDecision.stop("operator_cancel")
+            return GateDecision.allow()
+
+        async def before_commit(self, request: CommitRequest) -> GateDecision:
+            return GateDecision.allow()
+
+    class DeliverySpy:
+        def __init__(self) -> None:
+            self.kinds: list[str] = []
+
+        def on_observation(self, observation: GraphObservation) -> None:
+            self.kinds.append(observation.event.kind)
+
+    delivery = DeliverySpy()
+    res = await run_with_plugins(
+        graph,
+        state(),
+        delivery=delivery,
+        gate=StopGate(),
+    )
+    assert res.status == "stopped"
+    assert "stopped" in delivery.kinds
+

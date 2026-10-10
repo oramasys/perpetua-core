@@ -16,6 +16,7 @@ from perpetua_core.graph.engine import (
     GraphObservation,
     MiniGraph,
 )
+from perpetua_core.graph.gate import DispatchGate
 from perpetua_core.state import PerpetuaState
 
 
@@ -47,9 +48,12 @@ def _detached_observation(observation: GraphObservation) -> GraphObservation:
 async def run_with_plugins(
     graph: MiniGraph | CompiledGraph,
     initial_state: PerpetuaState,
-    plugins: Sequence[GraphPlugin],
+    plugins: Sequence[GraphPlugin] = (),
+    *,
+    delivery: GraphPlugin | None = None,
+    gate: DispatchGate | None = None,
 ) -> PerpetuaState:
-    """Run once and push every observation to every plugin.
+    """Run once and push every observation to delivery and every plugin.
 
     Delivery is ordered and fail-closed by default. A plugin failure therefore
     stops the run instead of silently losing checkpoint/audit evidence. Richer
@@ -62,8 +66,12 @@ async def run_with_plugins(
     compiled = graph.compile() if isinstance(graph, MiniGraph) else graph
     final_state = initial_state
 
-    async for observation in compiled.aobserve(initial_state):
+    async for observation in compiled.aobserve(initial_state, gate=gate):
         final_state = observation.state
+        if delivery is not None:
+            result = delivery.on_observation(_detached_observation(observation))
+            if inspect.isawaitable(result):
+                await result
         for plugin in plugins:
             result = plugin.on_observation(_detached_observation(observation))
             if inspect.isawaitable(result):
