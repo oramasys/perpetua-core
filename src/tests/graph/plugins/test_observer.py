@@ -248,3 +248,34 @@ async def test_run_with_plugins_gate_stops_execution() -> None:
     assert res.status == "stopped"
     assert "stopped" in delivery.kinds
 
+
+@pytest.mark.asyncio
+async def test_cleanup_closes_iterator_on_failure() -> None:
+    """When a plugin or delivery fails, run_with_plugins must close the observation iterator."""
+    from perpetua_core.graph.delivery import CriticalDeliveryFailed
+    from perpetua_core.graph.engine import GraphEvent
+
+    iterator_closed = False
+
+    class ObservableGraph:
+        async def aobserve(self, state, *, gate=None):
+            nonlocal iterator_closed
+            try:
+                yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
+                yield GraphObservation(GraphEvent("node.end", node="work", steps=1), state)
+            finally:
+                iterator_closed = True
+
+        def compile(self):
+            return self
+
+    class FailingDelivery:
+        def on_observation(self, observation: GraphObservation):
+            raise CriticalDeliveryFailed("test.simulated_failure")
+
+    with pytest.raises(CriticalDeliveryFailed):
+        await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
+
+    assert iterator_closed is True
+
+
