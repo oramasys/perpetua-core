@@ -295,6 +295,38 @@ class _Settled:
     error: Exception | None
 
 
+class _BranchAdmissionFailed(RuntimeError):
+    """A per-branch dispatch failed after the fan-out batch was admitted."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        super().__init__(str(error))
+
+
+class _BranchStopped(RuntimeError):
+    """A per-branch dispatch observed a cooperative stop."""
+
+    def __init__(self, decision: GateDecision) -> None:
+        self.decision = decision
+        super().__init__(decision.reason)
+
+
+class _StartCallbackFailed(RuntimeError):
+    """A durable-start marker failed before its branch callable ran."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        super().__init__(str(error))
+
+
+class _BoundaryStopped(RuntimeError):
+    """An individually admitted callable boundary observed a stop."""
+
+    def __init__(self, decision: GateDecision) -> None:
+        self.decision = decision
+        super().__init__(decision.reason)
+
+
 @dataclass(slots=True)
 class _RegionResult:
     """Outcome of a settled fan-out region: admitted deltas and steps."""
@@ -389,10 +421,13 @@ class CompiledGraph:
         steps = 0
         last_node = START
         start_edge = self._edges.get(START, END)
-        decision = await self._dispatch(gate, start_edge, "router", (START,), steps, START)
+        decision, request = await self._dispatch(
+            gate, start_edge, "router", (START,), steps, START
+        )
         if decision is not None:
             yield _stopped(state, START, steps, decision)
             return
+        await self._before_start(gate, request)
         node = self._resolve_edge(start_edge, state)
 
         yield GraphObservation(
@@ -418,10 +453,13 @@ class CompiledGraph:
 
             # Ask the gate immediately before the call: a consumer may have changed
             # stop or authority state while this generator was paused on the yield.
-            decision = await self._dispatch(gate, None, "node", (current_node,), steps)
+            decision, request = await self._dispatch(
+                gate, None, "node", (current_node,), steps
+            )
             if decision is not None:
                 yield _stopped(state, current_node, steps, decision)
                 return
+            await self._before_start(gate, request)
             try:
                 delta = node_fn(state)
                 if inspect.isawaitable(delta):
@@ -486,10 +524,13 @@ class CompiledGraph:
                     return
                 state, steps = result.state, result.steps
                 edge = edge.then
-            decision = await self._dispatch(gate, edge, "router", (current_node,), steps, current_node)
+            decision, request = await self._dispatch(
+                gate, edge, "router", (current_node,), steps, current_node
+            )
             if decision is not None:
                 yield _stopped(state, current_node, steps, decision)
                 return
+            await self._before_start(gate, request)
             node = self._resolve_edge(edge, state)
             yield GraphObservation(
                 GraphEvent(
@@ -516,19 +557,33 @@ class CompiledGraph:
         steps: int,
         source: str | None = None,
         batch_id: str | None = None,
-    ) -> GateDecision | None:
-        """Ask the gate before a boundary runs. Returns a stop decision, else None.
+    ) -> tuple[GateDecision | None, DispatchRequest | None]:
+        """Ask the gate before a boundary runs and retain its request.
 
         Routers are only guarded when executable (a callable edge); a static
         target runs no code. A refusal raises :class:`GateRefused`.
         """
         if gate is None:
-            return None
+            return None, None
         if boundary == "router" and not (isinstance(edge, ConditionalEdge) or callable(edge)):
-            return None
+            return None, None
         request = DispatchRequest(boundary, nodes, steps, source, batch_id)  # type: ignore[arg-type]
         decision = checked(await gate.before_dispatch(request))
-        return _enforce(decision, request)
+        return _enforce(decision, request), request
+
+    async def _before_start(
+        self, gate: DispatchGate | None, request: DispatchRequest | None
+    ) -> None:
+        """Durably mark an admitted callable immediately before control transfer."""
+        if gate is None or request is None:
+            return
+        callback = getattr(gate, "before_start", None)
+        if callback is None:
+            return
+        result = callback(request)
+        if not inspect.isawaitable(result):
+            raise TypeError("gate before_start must return an awaitable")
+        await result
 
     async def _commit(
         self,
@@ -616,7 +671,7 @@ class CompiledGraph:
         # One decision for the whole batch, taken after the last yield and
         # immediately before any branch starts: a refusal or stop starts none.
         batch_id = secrets.token_urlsafe(18)
-        decision = await self._dispatch(
+        decision, _ = await self._dispatch(
             gate, None, "fanout", branches, steps, source, batch_id
         )
         if decision is not None:
@@ -624,7 +679,46 @@ class CompiledGraph:
             result.stopped, result.state = True, stopped.state
             yield stopped
             return
-        settled = await self._settle(branches, snapshot)
+        if gate is None:
+            settled = await self._settle(branches, snapshot)
+        else:
+            settled = await self._settle_gated(
+                branches, snapshot, gate, steps, source, batch_id
+            )
+
+        admission_failures = [
+            item.error.error
+            for item in settled
+            if isinstance(item.error, _BranchAdmissionFailed)
+        ]
+        if admission_failures:
+            raise admission_failures[0]
+        branch_stops = [
+            item.error.decision
+            for item in settled
+            if isinstance(item.error, _BranchStopped)
+        ]
+        if branch_stops:
+            stopped = _stopped(state, source, steps, branch_stops[0])
+            result.stopped, result.state = True, stopped.state
+            yield stopped
+            return
+        start_failures = [
+            item.error.error
+            for item in settled
+            if isinstance(item.error, _StartCallbackFailed)
+        ]
+        if start_failures:
+            gate_refusals = [
+                error for error in start_failures if isinstance(error, GateRefused)
+            ]
+            if gate_refusals:
+                raise gate_refusals[0]
+            raise ExceptionGroup(
+                f"fan-out region {source!r} durable start failed",
+                start_failures,
+            )
+
         # Completed node executions now include every branch that settled ok.
         completed = steps + sum(1 for s in settled if s.error is None)
 
@@ -647,21 +741,34 @@ class CompiledGraph:
             return
 
         if edge.join.kind == "custom":
-            decision = await self._dispatch(gate, None, "join", branches, completed, source)
+            decision, request = await self._dispatch(
+                gate, None, "join", branches, completed, source, batch_id
+            )
             if decision is not None:
                 stopped = _stopped(state, source, steps, decision)
                 result.stopped, result.state = True, stopped.state
                 yield stopped
                 return
+            await self._before_start(gate, request)
         admitted = self._admit(source, edge.join, settled)
         admitted_names = tuple(item.name for item in admitted)
-        decision = await self._dispatch(gate, None, "reducer", admitted_names, completed, source)
+        decision, request = await self._dispatch(
+            gate, None, "reducer", admitted_names, completed, source, batch_id
+        )
         if decision is not None:
             stopped = _stopped(state, source, steps, decision)
             result.stopped, result.state = True, stopped.state
             yield stopped
             return
-        merged, provenance = self._fold(snapshot, admitted)
+        try:
+            merged, provenance = await self._fold(
+                snapshot, admitted, gate, request
+            )
+        except _BoundaryStopped as stopped_boundary:
+            stopped = _stopped(state, source, steps, stopped_boundary.decision)
+            result.stopped, result.state = True, stopped.state
+            yield stopped
+            return
         if gate is not None:
             merged = copy.deepcopy(merged)  # hash and publish the same snapshot
         decision, request = await self._commit(
@@ -715,14 +822,42 @@ class CompiledGraph:
     async def _settle(
         self, branches: tuple[str, ...], snapshot: PerpetuaState
     ) -> list[_Settled]:
+        """Run every ungated branch on one snapshot in canonical order."""
+        return await self._settle_gated(
+            branches, snapshot, None, 0, "", ""
+        )
+
+    async def _settle_gated(
+        self,
+        branches: tuple[str, ...],
+        snapshot: PerpetuaState,
+        gate: DispatchGate | None,
+        steps: int,
+        source: str,
+        batch_id: str,
+    ) -> list[_Settled]:
         """Run every branch on one snapshot; return outcomes in branch order."""
 
         async def call(name: str) -> _Settled:
             """Run one branch node and capture its outcome without raising."""
+            # Isolated copy: a branch mutating its input cannot leak into a
+            # sibling, the interrupted state or the committed state.
+            branch_state = snapshot.model_copy(deep=True)
+            if getattr(gate, "before_start", None) is not None:
+                try:
+                    decision, request = await self._dispatch(
+                        gate, None, "node", (name,), steps, source, batch_id
+                    )
+                except Exception as exc:
+                    return _Settled(name, None, _BranchAdmissionFailed(exc))
+                if decision is not None:
+                    return _Settled(name, None, _BranchStopped(decision))
+                try:
+                    await self._before_start(gate, request)
+                except Exception as exc:
+                    return _Settled(name, None, _StartCallbackFailed(exc))
             try:
-                # Isolated copy: a branch mutating its input cannot leak into a
-                # sibling, the interrupted state or the committed state.
-                delta = self._nodes[name](snapshot.model_copy(deep=True))
+                delta = self._nodes[name](branch_state)
                 if inspect.isawaitable(delta):
                     delta = await delta
             except Exception as exc:
@@ -783,8 +918,12 @@ class CompiledGraph:
             )
         return admitted
 
-    def _fold(
-        self, snapshot: PerpetuaState, admitted: list[_Settled]
+    async def _fold(
+        self,
+        snapshot: PerpetuaState,
+        admitted: list[_Settled],
+        gate: DispatchGate | None,
+        request: DispatchRequest | None,
     ) -> tuple[NodeDelta, dict[str, tuple[str, ...]]]:
         """Fold admitted deltas, in branch order, into one delta plus provenance."""
         contributions: dict[str, list[tuple[str, Any]]] = {}
@@ -796,6 +935,24 @@ class CompiledGraph:
         provenance: dict[str, tuple[str, ...]] = {}
         for key in sorted(contributions):
             declared = self._reducers.get(key)
+            if (
+                declared is not None
+                and declared.kind == "custom"
+                and request is not None
+                and getattr(gate, "before_start", None) is not None
+            ):
+                decision, reducer_request = await self._dispatch(
+                    gate,
+                    None,
+                    "reducer",
+                    (*request.nodes, key),
+                    request.steps,
+                    request.source,
+                    request.batch_id,
+                )
+                if decision is not None:
+                    raise _BoundaryStopped(decision)
+                await self._before_start(gate, reducer_request)
             merged[key] = reduce_field(
                 key,
                 declared or DEFAULT_REDUCER,
