@@ -13,6 +13,7 @@ outside this module.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import inspect
 import json
@@ -58,7 +59,7 @@ def _delta_digest(delta: NodeDelta) -> str:
     Ungated legacy execution never calls this function.
     """
     try:
-        encoded = json.dumps(delta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(delta, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as error:
         raise TypeError("gated commit delta must be canonical JSON") from error
     return hashlib.sha256(encoded).hexdigest()
@@ -446,6 +447,10 @@ class CompiledGraph:
                     f"{type(delta).__name__}; expected dict delta"
                 )
 
+            if gate is not None:
+                # Hash and publish one immutable snapshot: a node-shared mutable value
+                # cannot change while the gate is awaited.
+                delta = copy.deepcopy(delta)
             decision, request = await self._commit(
                 gate, "node", (current_node,), steps, delta=delta
             )
@@ -454,13 +459,20 @@ class CompiledGraph:
                 return
             # Publish synchronously after the commit decision: no await in between.
             state = state.merge(delta)
-            await self._after_commit(gate, request)
+            settlement_error: Exception | None = None
+            try:
+                await self._after_commit(gate, request)
+            except Exception as exc:  # noqa: BLE001 - re-raised after publication
+                settlement_error = exc
             steps += 1
             yield GraphObservation(
                 GraphEvent("node.end", node=current_node, steps=steps),
                 state,
                 delta=delta,
             )
+            if settlement_error is not None:
+                # The delta is already published and observed; scheduling stops here.
+                raise settlement_error
 
             edge = self._edges.get(current_node, END)
             if isinstance(edge, FanOut):
@@ -649,6 +661,8 @@ class CompiledGraph:
             yield stopped
             return
         merged, provenance = self._fold(snapshot, admitted)
+        if gate is not None:
+            merged = copy.deepcopy(merged)  # hash and publish the same snapshot
         decision, request = await self._commit(
             gate,
             "region",
@@ -665,7 +679,11 @@ class CompiledGraph:
             return
         # Publish synchronously after the commit decision: no await in between.
         committed = snapshot.merge(merged)
-        await self._after_commit(gate, request)
+        settlement_error: Exception | None = None
+        try:
+            await self._after_commit(gate, request)
+        except Exception as exc:  # noqa: BLE001 - re-raised after publication
+            settlement_error = exc
         steps = completed
 
         for item in admitted:
@@ -688,6 +706,9 @@ class CompiledGraph:
         )
         result.state = committed
         result.steps = steps
+        if settlement_error is not None:
+            # Already published and observed; scheduling stops on the settlement error.
+            raise settlement_error
 
     async def _settle(
         self, branches: tuple[str, ...], snapshot: PerpetuaState

@@ -468,3 +468,60 @@ async def test_region_requests_count_completed_branches():
     assert gate.steps[("dispatch", "join")] == 3  # plan + two settled branches
     assert gate.steps[("dispatch", "reducer")] == 3
     assert gate.steps[("commit", "region")] == 3
+
+
+async def test_non_finite_delta_fails_before_the_commit_gate() -> None:
+    """NaN would digest as invalid JSON; it must be refused before before_commit."""
+    graph = MiniGraph()
+    graph.add_node("a", lambda s: {"scratchpad": {"x": float("nan")}})
+    graph.set_entry("a")
+    graph.add_edge("a", END)
+    gate = RecordingGate()
+    with pytest.raises(TypeError, match="canonical JSON"):
+        await graph.compile().ainvoke(fresh(), gate=gate)
+    assert ("commit", "node", ("a",)) not in gate.calls
+
+
+async def test_gate_hashes_the_delta_it_publishes_even_if_the_node_mutates_it() -> None:
+    """A node-shared mutable delta changing during the await cannot split digest from state."""
+    shared: dict[str, Any] = {"scratchpad": {"v": 1}}
+    seen: list[str] = []
+
+    class MutatingGate(RecordingGate):
+        """Mutates the node's shared delta while the commit decision is awaited."""
+
+        async def before_commit(self, request: CommitRequest) -> GateDecision:
+            """Record the digest, then mutate the shared object before publication."""
+            seen.append(request.result_digest)
+            shared["scratchpad"]["v"] = 2
+            return await super().before_commit(request)
+
+    graph = MiniGraph()
+    graph.add_node("a", lambda s: shared)
+    graph.set_entry("a")
+    graph.add_edge("a", END)
+    state = await graph.compile().ainvoke(fresh(), gate=MutatingGate())
+    expected = hashlib.sha256(
+        json.dumps({"scratchpad": {"v": 1}}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert seen == [expected]
+    assert state.scratchpad == {"v": 1}
+
+
+async def test_after_commit_failure_still_publishes_committed_state_then_stops() -> None:
+    """A failed settlement hook must not hide the already-merged state from observers."""
+
+    class FailingSettle(RecordingGate):
+        """Raises from the optional settlement hook."""
+
+        async def after_commit(self, request: CommitRequest) -> None:
+            """Fail settlement after publication."""
+            raise RuntimeError("settlement down")
+
+    observed: list[tuple[str, dict[str, Any]]] = []
+    graph = linear([]).compile()
+    with pytest.raises(RuntimeError, match="settlement down"):
+        async for obs in graph.aobserve(fresh(), gate=FailingSettle()):
+            observed.append((obs.event.kind, dict(obs.state.scratchpad)))
+    assert ("node.end", {"a": 1}) in observed
+    assert all(kind != "run.end" for kind, _ in observed)

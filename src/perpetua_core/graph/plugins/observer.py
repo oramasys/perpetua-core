@@ -26,7 +26,8 @@ class GraphPlugin(Protocol):
     def on_observation(
         self,
         observation: GraphObservation,
-    ) -> object | Awaitable[object]: ...
+    ) -> object | Awaitable[object]:
+        """Test helper: on observation."""
 
 
 def _detached_observation(observation: GraphObservation) -> GraphObservation:
