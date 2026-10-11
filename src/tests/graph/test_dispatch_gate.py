@@ -524,4 +524,42 @@ async def test_after_commit_failure_still_publishes_committed_state_then_stops()
         async for obs in graph.aobserve(fresh(), gate=FailingSettle()):
             observed.append((obs.event.kind, dict(obs.state.scratchpad)))
     assert ("node.end", {"a": 1}) in observed
-    assert all(kind != "run.end" for kind, _ in observed)
+    assert all(kind != "done" for kind, _ in observed)
+
+
+async def test_cancelled_settlement_still_publishes_committed_state_then_cancels() -> None:
+    """Cancellation inside after_commit surfaces node.end before it propagates."""
+
+    class CancelledSettle(RecordingGate):
+        """Is cancelled inside the optional settlement hook."""
+
+        async def after_commit(self, request: CommitRequest) -> None:
+            """Raise cancellation after publication."""
+            raise asyncio.CancelledError
+
+    observed: list[str] = []
+    with pytest.raises(asyncio.CancelledError):
+        async for obs in linear([]).compile().aobserve(fresh(), gate=CancelledSettle()):
+            observed.append(obs.event.kind)
+    assert "node.end" in observed
+    assert "done" not in observed
+
+
+async def test_cancelled_region_settlement_publishes_branches_and_commit() -> None:
+    """A cancelled region settlement still surfaces branch node.end and superstep.commit."""
+
+    class CancelledRegionSettle(RecordingGate):
+        """Cancels settlement for the region commit only."""
+
+        async def after_commit(self, request: CommitRequest) -> None:
+            """Raise cancellation after the region publishes."""
+            if request.boundary == "region":
+                raise asyncio.CancelledError
+
+    observed: list[str] = []
+    with pytest.raises(asyncio.CancelledError):
+        async for obs in region([]).compile().aobserve(fresh(), gate=CancelledRegionSettle()):
+            observed.append(obs.event.kind)
+    assert "superstep.commit" in observed
+    assert observed.count("node.end") >= 2
+    assert "done" not in observed

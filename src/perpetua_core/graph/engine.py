@@ -459,10 +459,11 @@ class CompiledGraph:
                 return
             # Publish synchronously after the commit decision: no await in between.
             state = state.merge(delta)
-            settlement_error: Exception | None = None
+            settlement_error: BaseException | None = None
             try:
                 await self._after_commit(gate, request)
-            except Exception as exc:  # noqa: BLE001 - re-raised after publication
+            except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
+                # Re-raised (cancellation included) only after publication is observed.
                 settlement_error = exc
             steps += 1
             yield GraphObservation(
@@ -679,10 +680,11 @@ class CompiledGraph:
             return
         # Publish synchronously after the commit decision: no await in between.
         committed = snapshot.merge(merged)
-        settlement_error: Exception | None = None
+        settlement_error: BaseException | None = None
         try:
             await self._after_commit(gate, request)
-        except Exception as exc:  # noqa: BLE001 - re-raised after publication
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
+            # Re-raised (cancellation included) only after publication is observed.
             settlement_error = exc
         steps = completed
 
