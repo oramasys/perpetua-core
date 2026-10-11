@@ -277,3 +277,38 @@ async def test_cleanup_closes_iterator_on_failure() -> None:
         await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
 
     assert iterator_closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cleanup_failure",
+    [RuntimeError("close failed"), asyncio.CancelledError("close cancelled")],
+)
+async def test_cleanup_failure_preserves_critical_delivery_failure(
+    cleanup_failure: BaseException,
+) -> None:
+    """Delivery and iterator-close failures remain visible as one explicit group."""
+    from perpetua_core.graph.delivery import CriticalDeliveryFailed
+    from perpetua_core.graph.engine import GraphEvent
+
+    class ObservableGraph:
+        async def aobserve(self, state, *, gate=None):
+            try:
+                yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
+            finally:
+                raise cleanup_failure
+
+        def compile(self):
+            return self
+
+    class FailingDelivery:
+        def on_observation(self, observation: GraphObservation):
+            raise CriticalDeliveryFailed("test.simulated_failure")
+
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
+
+    primary, cleanup = caught.value.exceptions
+    assert isinstance(primary, CriticalDeliveryFailed)
+    assert primary.cause_code == "test.simulated_failure"
+    assert cleanup is cleanup_failure

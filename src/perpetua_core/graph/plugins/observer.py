@@ -79,7 +79,17 @@ async def run_with_plugins(
                 result = plugin.on_observation(_detached_observation(observation))
                 if inspect.isawaitable(result):
                     await result
-    finally:
+    except BaseException as primary_failure:
+        try:
+            if hasattr(obs_iter, "aclose"):
+                await obs_iter.aclose()
+        except BaseException as cleanup_failure:
+            raise BaseExceptionGroup(
+                "observation processing and iterator cleanup failed",
+                [primary_failure, cleanup_failure],
+            ) from None
+        raise
+    else:
         if hasattr(obs_iter, "aclose"):
             await obs_iter.aclose()
 
