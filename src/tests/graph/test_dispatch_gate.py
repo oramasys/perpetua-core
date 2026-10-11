@@ -6,6 +6,8 @@ Core owns only the protocol and the call sites. Whoever implements the gate
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any
 
 import pytest
@@ -54,6 +56,41 @@ class RecordingGate:
         """Test helper: before commit."""
         self.calls.append(("commit", request.boundary, request.nodes))
         return self._decide("commit", request.boundary)
+
+
+class SettlingGate(RecordingGate):
+    """Records the optional post-publication lifecycle callback."""
+
+    def __init__(self) -> None:
+        """Initialise the callback record alongside ordinary gate decisions."""
+        super().__init__()
+        self.settled: list[CommitRequest] = []
+
+    async def after_commit(self, request: CommitRequest) -> None:
+        """Record the exact identity Core associated with the published delta."""
+        self.settled.append(request)
+
+
+class BatchTrackingGate(RecordingGate):
+    """Captures the opaque fan-out correlation token at both boundaries."""
+
+    def __init__(self) -> None:
+        """Initialise empty boundary records."""
+        super().__init__()
+        self.fanout: DispatchRequest | None = None
+        self.region: CommitRequest | None = None
+
+    async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Record the one fan-out request without changing admission."""
+        if request.boundary == "fanout":
+            self.fanout = request
+        return await super().before_dispatch(request)
+
+    async def before_commit(self, request: CommitRequest) -> GateDecision:
+        """Record the one region publication request without changing admission."""
+        if request.boundary == "region":
+            self.region = request
+        return await super().before_commit(request)
 
 
 def linear(calls: list[str]) -> MiniGraph:
@@ -126,6 +163,32 @@ async def test_linear_node_is_guarded_before_dispatch_and_before_commit():
     gate = RecordingGate()
     await linear([]).compile().ainvoke(fresh(), gate=gate)
     assert gate.calls == [("dispatch", "node", ("a",)), ("commit", "node", ("a",))]
+
+
+async def test_post_commit_callback_receives_the_published_delta_digest() -> None:
+    """Core exposes a neutral digest only after the synchronous publish boundary."""
+    gate = SettlingGate()
+    state = await linear([]).compile().ainvoke(fresh(), gate=gate)
+
+    expected = hashlib.sha256(
+        json.dumps({"scratchpad": {"a": 1}}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert state.scratchpad == {"a": 1}
+    assert len(gate.settled) == 1
+    assert gate.settled[0].result_digest == expected
+
+
+async def test_region_threads_one_opaque_batch_id_from_dispatch_to_commit() -> None:
+    """A fan-out's opaque batch token remains stable through region publication."""
+    gate = BatchTrackingGate()
+
+    await region([]).compile().ainvoke(fresh(), gate=gate)
+
+    assert gate.fanout is not None
+    assert gate.region is not None
+    assert isinstance(gate.fanout.batch_id, str)
+    assert gate.fanout.batch_id
+    assert gate.region.batch_id == gate.fanout.batch_id
 
 
 async def test_router_is_guarded_before_it_runs():
@@ -405,3 +468,98 @@ async def test_region_requests_count_completed_branches():
     assert gate.steps[("dispatch", "join")] == 3  # plan + two settled branches
     assert gate.steps[("dispatch", "reducer")] == 3
     assert gate.steps[("commit", "region")] == 3
+
+
+async def test_non_finite_delta_fails_before_the_commit_gate() -> None:
+    """NaN would digest as invalid JSON; it must be refused before before_commit."""
+    graph = MiniGraph()
+    graph.add_node("a", lambda s: {"scratchpad": {"x": float("nan")}})
+    graph.set_entry("a")
+    graph.add_edge("a", END)
+    gate = RecordingGate()
+    with pytest.raises(TypeError, match="canonical JSON"):
+        await graph.compile().ainvoke(fresh(), gate=gate)
+    assert ("commit", "node", ("a",)) not in gate.calls
+
+
+async def test_gate_hashes_the_delta_it_publishes_even_if_the_node_mutates_it() -> None:
+    """A node-shared mutable delta changing during the await cannot split digest from state."""
+    shared: dict[str, Any] = {"scratchpad": {"v": 1}}
+    seen: list[str] = []
+
+    class MutatingGate(RecordingGate):
+        """Mutates the node's shared delta while the commit decision is awaited."""
+
+        async def before_commit(self, request: CommitRequest) -> GateDecision:
+            """Record the digest, then mutate the shared object before publication."""
+            seen.append(request.result_digest)
+            shared["scratchpad"]["v"] = 2
+            return await super().before_commit(request)
+
+    graph = MiniGraph()
+    graph.add_node("a", lambda s: shared)
+    graph.set_entry("a")
+    graph.add_edge("a", END)
+    state = await graph.compile().ainvoke(fresh(), gate=MutatingGate())
+    expected = hashlib.sha256(
+        json.dumps({"scratchpad": {"v": 1}}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert seen == [expected]
+    assert state.scratchpad == {"v": 1}
+
+
+async def test_after_commit_failure_still_publishes_committed_state_then_stops() -> None:
+    """A failed settlement hook must not hide the already-merged state from observers."""
+
+    class FailingSettle(RecordingGate):
+        """Raises from the optional settlement hook."""
+
+        async def after_commit(self, request: CommitRequest) -> None:
+            """Fail settlement after publication."""
+            raise RuntimeError("settlement down")
+
+    observed: list[tuple[str, dict[str, Any]]] = []
+    graph = linear([]).compile()
+    with pytest.raises(RuntimeError, match="settlement down"):
+        async for obs in graph.aobserve(fresh(), gate=FailingSettle()):
+            observed.append((obs.event.kind, dict(obs.state.scratchpad)))
+    assert ("node.end", {"a": 1}) in observed
+    assert all(kind != "done" for kind, _ in observed)
+
+
+async def test_cancelled_settlement_still_publishes_committed_state_then_cancels() -> None:
+    """Cancellation inside after_commit surfaces node.end before it propagates."""
+
+    class CancelledSettle(RecordingGate):
+        """Is cancelled inside the optional settlement hook."""
+
+        async def after_commit(self, request: CommitRequest) -> None:
+            """Raise cancellation after publication."""
+            raise asyncio.CancelledError
+
+    observed: list[str] = []
+    with pytest.raises(asyncio.CancelledError):
+        async for obs in linear([]).compile().aobserve(fresh(), gate=CancelledSettle()):
+            observed.append(obs.event.kind)
+    assert "node.end" in observed
+    assert "done" not in observed
+
+
+async def test_cancelled_region_settlement_publishes_branches_and_commit() -> None:
+    """A cancelled region settlement still surfaces branch node.end and superstep.commit."""
+
+    class CancelledRegionSettle(RecordingGate):
+        """Cancels settlement for the region commit only."""
+
+        async def after_commit(self, request: CommitRequest) -> None:
+            """Raise cancellation after the region publishes."""
+            if request.boundary == "region":
+                raise asyncio.CancelledError
+
+    observed: list[str] = []
+    with pytest.raises(asyncio.CancelledError):
+        async for obs in region([]).compile().aobserve(fresh(), gate=CancelledRegionSettle()):
+            observed.append(obs.event.kind)
+    assert "superstep.commit" in observed
+    assert observed.count("node.end") >= 2
+    assert "done" not in observed
