@@ -4,7 +4,7 @@ from __future__ import annotations
 
 class CriticalDeliveryFailed(RuntimeError):
     """Neutral Core-side failure type. Carries a sanitized, stable cause code.
-    
+
     Core has NO knowledge of Oramasys terminal policy -- it just raises this;
     Oramasys's observer catches it, records run/attempt evidence via the
     EXISTING UnknownDisposition type, and maps it to stop + delivery uncertainty.

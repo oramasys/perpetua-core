@@ -277,5 +277,3 @@ async def test_cleanup_closes_iterator_on_failure() -> None:
         await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
 
     assert iterator_closed is True
-
-
