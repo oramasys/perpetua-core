@@ -56,6 +56,7 @@ def reduce_field(
     contributions: Sequence[tuple[str, Any]],
     *,
     contribution_semantics: bool,
+    prepared_inputs: tuple[Any, Any] | None = None,
 ) -> Any:
     """Fold one field's branch writes into its committed value.
 
@@ -88,7 +89,23 @@ def reduce_field(
     assert reducer.fn is not None
     # A contract-violating custom fold must not mutate the pre-commit snapshot
     # or another field's contributions before raising or returning.
-    return reducer.fn(deepcopy(base), deepcopy(values))
+    base_copy, values_copy = (
+        prepared_inputs
+        if prepared_inputs is not None
+        else prepare_custom_inputs(base, contributions)
+    )
+    return reducer.fn(base_copy, values_copy)
+
+
+def prepare_custom_inputs(
+    base: Any, contributions: Sequence[tuple[str, Any]]
+) -> tuple[Any, tuple[Any, ...]]:
+    """Detach a custom reducer's inputs so it cannot mutate committed state.
+
+    Callers that mark the reducer started must prepare these first: a value
+    that cannot be copied then fails before the marker claims control passed.
+    """
+    return deepcopy(base), deepcopy(tuple(value for _, value in contributions))
 
 
 def _require_list(field: str, who: str, value: Any, kind: str) -> list[Any]:

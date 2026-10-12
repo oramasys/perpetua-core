@@ -31,7 +31,12 @@ from perpetua_core.graph.gate import (
     GateRefused,
     checked,
 )
-from perpetua_core.graph.reducers import DEFAULT_REDUCER, Reducer, reduce_field
+from perpetua_core.graph.reducers import (
+    DEFAULT_REDUCER,
+    Reducer,
+    prepare_custom_inputs,
+    reduce_field,
+)
 from perpetua_core.graph.spec import (
     JOIN_KINDS,
     EdgeSpec,
@@ -693,16 +698,8 @@ class CompiledGraph:
         ]
         if admission_failures:
             raise admission_failures[0]
-        branch_stops = [
-            item.error.decision
-            for item in settled
-            if isinstance(item.error, _BranchStopped)
-        ]
-        if branch_stops:
-            stopped = _stopped(state, source, steps, branch_stops[0])
-            result.stopped, result.state = True, stopped.state
-            yield stopped
-            return
+        # A durable-start failure outranks a cooperative stop: a marker write
+        # may have partly succeeded, so the caller must see that error.
         start_failures = [
             item.error.error
             for item in settled
@@ -718,6 +715,16 @@ class CompiledGraph:
                 f"fan-out region {source!r} durable start failed",
                 start_failures,
             )
+        branch_stops = [
+            item.error.decision
+            for item in settled
+            if isinstance(item.error, _BranchStopped)
+        ]
+        if branch_stops:
+            stopped = _stopped(state, source, steps, branch_stops[0])
+            result.stopped, result.state = True, stopped.state
+            yield stopped
+            return
 
         # Completed node executions now include every branch that settled ok.
         completed = steps + sum(1 for s in settled if s.error is None)
@@ -935,12 +942,18 @@ class CompiledGraph:
         provenance: dict[str, tuple[str, ...]] = {}
         for key in sorted(contributions):
             declared = self._reducers.get(key)
+            prepared_inputs = None
             if (
                 declared is not None
                 and declared.kind == "custom"
                 and request is not None
                 and getattr(gate, "before_start", None) is not None
             ):
+                # Copy inputs before the marker: a value that cannot be copied
+                # must fail before the callable is claimed as started.
+                prepared_inputs = prepare_custom_inputs(
+                    getattr(snapshot, key, None), contributions[key]
+                )
                 decision, reducer_request = await self._dispatch(
                     gate,
                     None,
@@ -959,6 +972,7 @@ class CompiledGraph:
                 getattr(snapshot, key, None),
                 contributions[key],
                 contribution_semantics=declared is not None,
+                prepared_inputs=prepared_inputs,
             )
             provenance[key] = tuple(name for name, _ in contributions[key])
         return merged, provenance

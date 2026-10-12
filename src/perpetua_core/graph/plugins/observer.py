@@ -63,6 +63,13 @@ async def run_with_plugins(
     Each listener receives a detached rich payload. Mutating an observation is
     still a plugin-contract violation, but cannot corrupt later listeners or the
     live graph run.
+
+    Failure shape: a listener or graph failure propagates unchanged when the
+    iterator then closes cleanly. If iterator cleanup also fails, both errors
+    are raised together as one ``BaseExceptionGroup`` so neither is lost. A
+    plain ``except CriticalDeliveryFailed`` will not catch an error inside that
+    group; use ``except* CriticalDeliveryFailed`` (or inspect ``.exceptions``)
+    when cleanup failure must not mask a delivery failure.
     """
     compiled = graph.compile() if isinstance(graph, MiniGraph) else graph
     final_state = initial_state

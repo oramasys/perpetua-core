@@ -312,3 +312,33 @@ async def test_cleanup_failure_preserves_critical_delivery_failure(
     assert isinstance(primary, CriticalDeliveryFailed)
     assert primary.cause_code == "test.simulated_failure"
     assert cleanup is cleanup_failure
+
+
+async def test_documented_except_star_catches_delivery_failure_in_the_group() -> None:
+    """The documented ``except*`` recipe recovers the delivery error from the group."""
+    from perpetua_core.graph.delivery import CriticalDeliveryFailed
+    from perpetua_core.graph.engine import GraphEvent
+
+    class ObservableGraph:
+        async def aobserve(self, state, *, gate=None):
+            try:
+                yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
+            finally:
+                raise RuntimeError("iterator close failed")
+
+        def compile(self):
+            return self
+
+    class FailingDelivery:
+        def on_observation(self, observation: GraphObservation):
+            raise CriticalDeliveryFailed("test.simulated_failure")
+
+    seen: list[str] = []
+    try:
+        await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
+    except* CriticalDeliveryFailed as group:
+        seen = [error.cause_code for error in group.exceptions]
+    except* RuntimeError:
+        pass
+
+    assert seen == ["test.simulated_failure"]

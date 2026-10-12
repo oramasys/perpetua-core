@@ -272,3 +272,65 @@ async def test_custom_join_and_each_custom_reducer_mark_only_real_calls() -> Non
     assert all(request.steps == join_start.steps == 3 for request in reducer_starts)
     assert join_start.batch_id == fanout.batch_id
     assert all(request.batch_id == fanout.batch_id for request in reducer_starts)
+
+
+async def test_fanout_start_failure_outranks_a_cooperative_branch_stop() -> None:
+    """A partly written start marker must surface even when another branch stops."""
+
+    class StopA_FailB(StartGate):
+        async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+            await super().before_dispatch(request)
+            if (
+                request.boundary == "node"
+                and request.nodes == ("a",)
+                and request.batch_id is not None
+            ):
+                return GateDecision.stop("operator.stop")
+            return GateDecision.allow()
+
+        async def before_start(self, request: DispatchRequest) -> None:
+            await super().before_start(request)
+            if request.boundary == "node" and request.nodes == ("b",):
+                raise RuntimeError("b start marker write failed")
+
+    graph = MiniGraph()
+    graph.add_node("plan", lambda state: {})
+    graph.add_node("a", lambda state: {})
+    graph.add_node("b", lambda state: {})
+    graph.set_entry("plan")
+    graph.add_edge("plan", FanOut(("a", "b"), END, Join("any")))
+
+    with pytest.raises(ExceptionGroup, match="durable start") as failed:
+        await graph.compile().ainvoke(fresh(), gate=StopA_FailB())
+
+    assert [str(error) for error in failed.value.exceptions] == [
+        "b start marker write failed"
+    ]
+
+
+async def test_uncopyable_reducer_input_fails_before_the_start_marker() -> None:
+    """A reducer whose inputs cannot be copied is never marked as started."""
+    gate = StartGate()
+    calls: list[str] = []
+
+    class Uncopyable:
+        def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+            raise TypeError("open handle cannot be copied")
+
+    def fold(base: Any, values: tuple[Any, ...]) -> dict[str, Any]:
+        calls.append("reducer")
+        return {}
+
+    graph = MiniGraph()
+    graph.add_node("plan", lambda state: {})
+    graph.add_node("a", lambda state: {"scratchpad": {"handle": Uncopyable()}})
+    graph.add_node("b", lambda state: {"scratchpad": {"other": 1}})
+    graph.set_entry("plan")
+    graph.add_edge("plan", FanOut(("a", "b"), END, Join("any")))
+    graph.add_reducer("scratchpad", Reducer("custom", fold))
+
+    with pytest.raises(TypeError, match="cannot be copied"):
+        await graph.compile().ainvoke(fresh(), gate=gate)
+
+    assert calls == []
+    assert [r for r in gate.started if r.boundary == "reducer"] == []
