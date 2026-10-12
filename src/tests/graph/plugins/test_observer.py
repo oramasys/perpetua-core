@@ -248,3 +248,97 @@ async def test_run_with_plugins_gate_stops_execution() -> None:
     assert res.status == "stopped"
     assert "stopped" in delivery.kinds
 
+
+@pytest.mark.asyncio
+async def test_cleanup_closes_iterator_on_failure() -> None:
+    """When a plugin or delivery fails, run_with_plugins must close the observation iterator."""
+    from perpetua_core.graph.delivery import CriticalDeliveryFailed
+    from perpetua_core.graph.engine import GraphEvent
+
+    iterator_closed = False
+
+    class ObservableGraph:
+        async def aobserve(self, state, *, gate=None):
+            nonlocal iterator_closed
+            try:
+                yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
+                yield GraphObservation(GraphEvent("node.end", node="work", steps=1), state)
+            finally:
+                iterator_closed = True
+
+        def compile(self):
+            return self
+
+    class FailingDelivery:
+        def on_observation(self, observation: GraphObservation):
+            raise CriticalDeliveryFailed("test.simulated_failure")
+
+    with pytest.raises(CriticalDeliveryFailed):
+        await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
+
+    assert iterator_closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cleanup_failure",
+    [RuntimeError("close failed"), asyncio.CancelledError("close cancelled")],
+)
+async def test_cleanup_failure_preserves_critical_delivery_failure(
+    cleanup_failure: BaseException,
+) -> None:
+    """Delivery and iterator-close failures remain visible as one explicit group."""
+    from perpetua_core.graph.delivery import CriticalDeliveryFailed
+    from perpetua_core.graph.engine import GraphEvent
+
+    class ObservableGraph:
+        async def aobserve(self, state, *, gate=None):
+            try:
+                yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
+            finally:
+                raise cleanup_failure
+
+        def compile(self):
+            return self
+
+    class FailingDelivery:
+        def on_observation(self, observation: GraphObservation):
+            raise CriticalDeliveryFailed("test.simulated_failure")
+
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
+
+    primary, cleanup = caught.value.exceptions
+    assert isinstance(primary, CriticalDeliveryFailed)
+    assert primary.cause_code == "test.simulated_failure"
+    assert cleanup is cleanup_failure
+
+
+async def test_documented_except_star_catches_delivery_failure_in_the_group() -> None:
+    """The documented ``except*`` recipe recovers the delivery error from the group."""
+    from perpetua_core.graph.delivery import CriticalDeliveryFailed
+    from perpetua_core.graph.engine import GraphEvent
+
+    class ObservableGraph:
+        async def aobserve(self, state, *, gate=None):
+            try:
+                yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
+            finally:
+                raise RuntimeError("iterator close failed")
+
+        def compile(self):
+            return self
+
+    class FailingDelivery:
+        def on_observation(self, observation: GraphObservation):
+            raise CriticalDeliveryFailed("test.simulated_failure")
+
+    seen: list[str] = []
+    try:
+        await run_with_plugins(ObservableGraph(), state(), delivery=FailingDelivery())
+    except* CriticalDeliveryFailed as group:
+        seen = [error.cause_code for error in group.exceptions]
+    except* RuntimeError:
+        pass
+
+    assert seen == ["test.simulated_failure"]

@@ -26,6 +26,11 @@ already counts the branches that settled successfully.
 A gate never cancels in-flight work and cannot undo an effect a callable already
 caused: settle-all semantics are unchanged. With no gate, behaviour and the event
 sequence are exactly the pre-T1 ones.
+
+Gates may also implement :class:`DurableStartGate`. Core detects that optional
+extension structurally and awaits it only after the matching dispatch request is
+allowed, immediately before the actual callable receives control. It is separate
+from :class:`DispatchGate` so existing gates do not acquire a mandatory method.
 """
 from __future__ import annotations
 
@@ -115,6 +120,14 @@ class DispatchGate(Protocol):
 
     async def before_commit(self, request: CommitRequest) -> GateDecision:
         """Decide whether the pending delta may be published."""
+
+
+@runtime_checkable
+class DurableStartGate(Protocol):
+    """Optional extension for persisting an admitted callable's start marker."""
+
+    async def before_start(self, request: DispatchRequest) -> None:
+        """Persist start evidence immediately before callable control transfer."""
 
 
 class GateRefused(RuntimeError):
