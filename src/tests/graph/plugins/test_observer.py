@@ -259,7 +259,7 @@ async def test_cleanup_closes_iterator_on_failure() -> None:
 
     class ObservableGraph:
         async def aobserve(self, state, *, gate=None):
-            """Yield one observation, then fail while the iterator is closed."""
+            """Yield two observations; closing the iterator only records that cleanup ran."""
             nonlocal iterator_closed
             try:
                 yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
