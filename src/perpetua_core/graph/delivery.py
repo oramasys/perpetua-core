@@ -11,5 +11,6 @@ class CriticalDeliveryFailed(RuntimeError):
     """
 
     def __init__(self, cause_code: str, message: str | None = None) -> None:
+        """Keep the stable cause code beside a message that never echoes sink internals."""
         super().__init__(message or f"Critical delivery failed: {cause_code}")
         self.cause_code = cause_code

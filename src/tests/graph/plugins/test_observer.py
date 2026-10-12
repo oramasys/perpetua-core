@@ -259,6 +259,7 @@ async def test_cleanup_closes_iterator_on_failure() -> None:
 
     class ObservableGraph:
         async def aobserve(self, state, *, gate=None):
+            """Yield one observation, then fail while the iterator is closed."""
             nonlocal iterator_closed
             try:
                 yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
@@ -267,10 +268,12 @@ async def test_cleanup_closes_iterator_on_failure() -> None:
                 iterator_closed = True
 
         def compile(self):
+            """Return self so the run uses this graph double directly."""
             return self
 
     class FailingDelivery:
         def on_observation(self, observation: GraphObservation):
+            """Fail delivery with the critical failure the run must surface."""
             raise CriticalDeliveryFailed("test.simulated_failure")
 
     with pytest.raises(CriticalDeliveryFailed):
@@ -293,16 +296,19 @@ async def test_cleanup_failure_preserves_critical_delivery_failure(
 
     class ObservableGraph:
         async def aobserve(self, state, *, gate=None):
+            """Yield one observation, then fail while the iterator is closed."""
             try:
                 yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
             finally:
                 raise cleanup_failure
 
         def compile(self):
+            """Return self so the run uses this graph double directly."""
             return self
 
     class FailingDelivery:
         def on_observation(self, observation: GraphObservation):
+            """Fail delivery with the critical failure the run must surface."""
             raise CriticalDeliveryFailed("test.simulated_failure")
 
     with pytest.raises(BaseExceptionGroup) as caught:
@@ -321,16 +327,19 @@ async def test_documented_except_star_catches_delivery_failure_in_the_group() ->
 
     class ObservableGraph:
         async def aobserve(self, state, *, gate=None):
+            """Yield one observation, then fail while the iterator is closed."""
             try:
                 yield GraphObservation(GraphEvent("node.start", node="work", steps=0), state)
             finally:
                 raise RuntimeError("iterator close failed")
 
         def compile(self):
+            """Return self so the run uses this graph double directly."""
             return self
 
     class FailingDelivery:
         def on_observation(self, observation: GraphObservation):
+            """Fail delivery with the critical failure the run must surface."""
             raise CriticalDeliveryFailed("test.simulated_failure")
 
     seen: list[str] = []

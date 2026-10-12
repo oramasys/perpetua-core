@@ -304,6 +304,7 @@ class _BranchAdmissionFailed(RuntimeError):
     """A per-branch dispatch failed after the fan-out batch was admitted."""
 
     def __init__(self, error: Exception) -> None:
+        """Wrap the branch's admission error so the region can re-raise it unchanged."""
         self.error = error
         super().__init__(str(error))
 
@@ -312,6 +313,7 @@ class _BranchStopped(RuntimeError):
     """A per-branch dispatch observed a cooperative stop."""
 
     def __init__(self, decision: GateDecision) -> None:
+        """Carry the stop decision that ended this branch before its callable ran."""
         self.decision = decision
         super().__init__(decision.reason)
 
@@ -320,6 +322,7 @@ class _StartCallbackFailed(RuntimeError):
     """A durable-start marker failed before its branch callable ran."""
 
     def __init__(self, error: Exception) -> None:
+        """Wrap the start-marker failure so the region can aggregate it across branches."""
         self.error = error
         super().__init__(str(error))
 
@@ -328,6 +331,7 @@ class _BoundaryStopped(RuntimeError):
     """An individually admitted callable boundary observed a stop."""
 
     def __init__(self, decision: GateDecision) -> None:
+        """Carry the stop decision observed at an individually admitted boundary."""
         self.decision = decision
         super().__init__(decision.reason)
 
