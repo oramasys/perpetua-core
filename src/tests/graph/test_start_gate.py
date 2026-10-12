@@ -107,6 +107,8 @@ async def test_start_callback_failure_prevents_callable_control_transfer() -> No
     calls: list[str] = []
 
     class BrokenStart(LegacyGate):
+        """Gate whose durable start of the work node always fails."""
+
         async def before_start(self, request: DispatchRequest) -> None:
             """Fail the durable start of the work node."""
             raise RuntimeError("start ledger down")
@@ -159,6 +161,8 @@ async def test_fanout_start_failure_is_captured_as_that_branch_outcome() -> None
     calls: list[str] = []
 
     class FailOneBranch(StartGate):
+        """Start gate that fails the durable start of branch a only."""
+
         async def before_start(self, request: DispatchRequest) -> None:
             """Fail the durable start of branch a only."""
             await super().before_start(request)
@@ -188,6 +192,8 @@ async def test_fanout_branch_dispatch_refusal_aborts_after_other_branches_settle
     calls: list[str] = []
 
     class RefuseOneBranch(StartGate):
+        """Start gate that refuses dispatch of node a inside a batch."""
+
         async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
             """Refuse the branch dispatch for node a inside the batch."""
             await super().before_dispatch(request)
@@ -297,6 +303,8 @@ async def test_fanout_start_failure_outranks_a_cooperative_branch_stop() -> None
     """A partly written start marker must surface even when another branch stops."""
 
     class StopA_FailB(StartGate):
+        """Start gate that stops node a's dispatch while node b fails."""
+
         async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
             """Stop the branch dispatch for node a inside the batch."""
             await super().before_dispatch(request)
@@ -335,6 +343,8 @@ async def test_uncopyable_reducer_input_fails_before_the_start_marker() -> None:
     calls: list[str] = []
 
     class Uncopyable:
+        """Scratchpad value that refuses to be deep-copied, like an open handle."""
+
         def __deepcopy__(self, memo: dict[int, Any]) -> Any:
             """Refuse to be copied, like an open handle in scratchpad."""
             raise TypeError("open handle cannot be copied")
