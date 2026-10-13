@@ -11,5 +11,10 @@ class CriticalDeliveryFailed(RuntimeError):
     """
 
     def __init__(self, cause_code: str, message: str | None = None) -> None:
+        """Store the cause code; the default message names only it.
+
+        A caller-supplied message is used as given, so callers must keep it free
+        of sink internals.
+        """
         super().__init__(message or f"Critical delivery failed: {cause_code}")
         self.cause_code = cause_code

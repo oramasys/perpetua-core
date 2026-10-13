@@ -25,9 +25,11 @@ class LegacyGate:
     """The mandatory T1 gate surface, without the optional start callback."""
 
     async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Allow every dispatch, like the mandatory T1 gate."""
         return GateDecision.allow()
 
     async def before_commit(self, request: CommitRequest) -> GateDecision:
+        """Allow every commit, like the mandatory T1 gate."""
         return GateDecision.allow()
 
 
@@ -35,21 +37,25 @@ class StartGate(LegacyGate):
     """Record durable-start requests and their ordering around callables."""
 
     def __init__(self, events: list[str] | None = None) -> None:
+        """Create the recording gate with an optional shared event log."""
         self.events = events if events is not None else []
         self.started: list[DispatchRequest] = []
         self.dispatched: list[DispatchRequest] = []
 
     async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+        """Record the dispatch request and allow it."""
         self.dispatched.append(request)
         self.events.append(f"dispatch:{request.boundary}:{','.join(request.nodes)}")
         return GateDecision.allow()
 
     async def before_start(self, request: DispatchRequest) -> None:
+        """Record the durable-start request and the ordering event."""
         self.started.append(request)
         self.events.append(f"start:{request.boundary}:{','.join(request.nodes)}")
 
 
 async def test_legacy_gate_without_before_start_remains_compatible() -> None:
+    """A gate without before_start keeps the T1 behaviour unchanged."""
     calls: list[str] = []
     graph = MiniGraph()
     graph.add_node("work", lambda state: calls.append("work") or {})
@@ -63,15 +69,18 @@ async def test_legacy_gate_without_before_start_remains_compatible() -> None:
 
 
 async def test_nodes_and_callable_routers_mark_start_after_admission() -> None:
+    """Nodes and callable routers mark a start only after dispatch admission."""
     events: list[str] = []
     gate = StartGate(events)
     graph = MiniGraph()
 
     def route(state: PerpetuaState) -> str:
+        """Record the router call and route to the work node."""
         events.append("call:router")
         return "work"
 
     def work(state: PerpetuaState) -> dict[str, Any]:
+        """Record the node call and return an empty delta."""
         events.append("call:node")
         return {}
 
@@ -94,10 +103,14 @@ async def test_nodes_and_callable_routers_mark_start_after_admission() -> None:
 
 
 async def test_start_callback_failure_prevents_callable_control_transfer() -> None:
+    """A failed start marker stops the callable from ever receiving control."""
     calls: list[str] = []
 
     class BrokenStart(LegacyGate):
+        """Gate whose durable start of the work node always fails."""
+
         async def before_start(self, request: DispatchRequest) -> None:
+            """Fail the durable start of the work node."""
             raise RuntimeError("start ledger down")
 
     graph = MiniGraph()
@@ -112,6 +125,7 @@ async def test_start_callback_failure_prevents_callable_control_transfer() -> No
 
 
 async def test_fanout_branches_get_individual_correlated_start_requests() -> None:
+    """Each fan-out branch gets its own correlated start request."""
     calls: list[str] = []
     gate = StartGate()
     graph = MiniGraph()
@@ -143,10 +157,14 @@ async def test_fanout_branches_get_individual_correlated_start_requests() -> Non
 
 
 async def test_fanout_start_failure_is_captured_as_that_branch_outcome() -> None:
+    """A branch start failure surfaces as a durable-start error for that branch."""
     calls: list[str] = []
 
     class FailOneBranch(StartGate):
+        """Start gate that fails the durable start of branch a only."""
+
         async def before_start(self, request: DispatchRequest) -> None:
+            """Fail the durable start of branch a only."""
             await super().before_start(request)
             if request.boundary == "node" and request.nodes == ("a",):
                 raise RuntimeError("a did not durably start")
@@ -170,10 +188,14 @@ async def test_fanout_start_failure_is_captured_as_that_branch_outcome() -> None
 
 
 async def test_fanout_branch_dispatch_refusal_aborts_after_other_branches_settle() -> None:
+    """A refused branch dispatch aborts the region after other branches settle."""
     calls: list[str] = []
 
     class RefuseOneBranch(StartGate):
+        """Start gate that refuses dispatch of node a inside a batch."""
+
         async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+            """Refuse the branch dispatch for node a inside the batch."""
             await super().before_dispatch(request)
             if (
                 request.boundary == "node"
@@ -204,6 +226,7 @@ async def test_fanout_branch_dispatch_refusal_aborts_after_other_branches_settle
 
 
 async def test_custom_join_and_each_custom_reducer_mark_only_real_calls() -> None:
+    """Only real custom join and reducer calls get start markers."""
     events: list[str] = []
     gate = StartGate(events)
     graph = MiniGraph()
@@ -226,10 +249,12 @@ async def test_custom_join_and_each_custom_reducer_mark_only_real_calls() -> Non
     )
 
     def admit(outcomes):
+        """Record the custom join call and admit every successful branch."""
         events.append("call:join")
         return [outcome.name for outcome in outcomes if outcome.ok]
 
     def fold(base: Any, values: tuple[Any, ...]) -> dict[str, Any]:
+        """Record the reducer call and merge branch values into the base."""
         events.append("call:reducer")
         merged = dict(base or {})
         for value in values:
@@ -278,7 +303,10 @@ async def test_fanout_start_failure_outranks_a_cooperative_branch_stop() -> None
     """A partly written start marker must surface even when another branch stops."""
 
     class StopA_FailB(StartGate):
+        """Start gate that stops node a's dispatch while node b fails."""
+
         async def before_dispatch(self, request: DispatchRequest) -> GateDecision:
+            """Stop the branch dispatch for node a inside the batch."""
             await super().before_dispatch(request)
             if (
                 request.boundary == "node"
@@ -289,6 +317,7 @@ async def test_fanout_start_failure_outranks_a_cooperative_branch_stop() -> None
             return GateDecision.allow()
 
         async def before_start(self, request: DispatchRequest) -> None:
+            """Fail the durable start of branch b only."""
             await super().before_start(request)
             if request.boundary == "node" and request.nodes == ("b",):
                 raise RuntimeError("b start marker write failed")
@@ -314,10 +343,14 @@ async def test_uncopyable_reducer_input_fails_before_the_start_marker() -> None:
     calls: list[str] = []
 
     class Uncopyable:
+        """Scratchpad value that refuses to be deep-copied, like an open handle."""
+
         def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+            """Refuse to be copied, like an open handle in scratchpad."""
             raise TypeError("open handle cannot be copied")
 
     def fold(base: Any, values: tuple[Any, ...]) -> dict[str, Any]:
+        """Record the reducer call; an uncopyable input must prevent it."""
         calls.append("reducer")
         return {}
 
