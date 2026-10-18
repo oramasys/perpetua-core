@@ -96,3 +96,7 @@ python3 -m venv .venv
 ```
 
 Requires Python ≥ 3.11.
+
+The [T2 observer reuse review](docs/T2_OBSERVER_REUSE_REVIEW_2026-10-19.md)
+records the historical cleanup-failure correction's presence in current main
+and the bounded source-test evidence for that conclusion.
